@@ -5,7 +5,7 @@ using B-Splines
 
 TO DO:
 - Optimize 4th derivative of position (snap)
-- Optimize 2nd derivative of heading (yaw spline)
+- Optimize 2nd derivative of heading (course spline)
 
 SNAP OPTIMIZATION:
 - C_p = A_p @ Q_d4_M
@@ -69,18 +69,18 @@ def plot_course_trajectory(ctrl_pts, knots, degree):
     
     # Generate the physical time array for the X-axis of the control points
     cp_time = np.linspace(knots[0], knots[-1], len(pts))
-    ax.plot(cp_time, pts, 'ro--', alpha=0.5, label='Yaw Control Polygon')
+    ax.plot(cp_time, pts, 'ro--', alpha=0.5, label='Course Control Polygon')
     
     # Evaluate smooth spline
     spline = BSpline(knots, pts, degree)
     t_smooth = np.linspace(knots[degree], knots[-degree-1], 100)
     curve = spline(t_smooth)
     
-    ax.plot(t_smooth, curve, 'b-', linewidth=3, label='Optimized Yaw Trajectory')
+    ax.plot(t_smooth, curve, 'b-', linewidth=3, label='Optimized Course Trajectory')
     
     ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Yaw Angle (Degrees or Rads)')
-    ax.set_title('Minimum 2nd-Derivative Yaw Spline')
+    ax.set_ylabel('Course Angle (Degrees or Rads)')
+    ax.set_title('Minimum 2nd-Derivative Course Spline')
     ax.legend()
     ax.grid(True)
     plt.show()
@@ -115,7 +115,7 @@ class MinSnapEval:
         # 3. Glue them together horizontally to build Ap
         # Order: [p0, v0, a0, af, vf, pf]
         A_p = np.hstack((p0, v0, a0, af, vf, pf))
-        print(f"A_p = {A_p}\n")
+        # print(f"A_p = {A_p}\n")
         B_d_3 = self._get_B_d3_matrix(degree)
 
         S_d4_M, snap_knots = self._get_S_matrix(degree, degree, self.knots, num_control_points)
@@ -204,7 +204,7 @@ class MinSnapEval:
 
 
 # ==========================================
-# MINIMUM COURSE EVALUATOR (1D YAW)
+# MINIMUM COURSE EVALUATOR (1D Course)
 # ==========================================
 
 class MinCourseEval:
@@ -339,7 +339,7 @@ if __name__ == "__main__":
     min_course_evaluator = MinCourseEval(initial_states_course, final_states_course, course_ctrl_pts, course_degree)
 
     course_optimized_pts = min_course_evaluator.min_course_ctrl_pts()
-    print("\n--- 1D Minimum Yaw Control Points ---")
+    print("\n--- 1D Minimum Course Control Points ---")
     print(course_optimized_pts)
 
     plot_course_trajectory(course_optimized_pts, min_course_evaluator.knots, course_degree)
