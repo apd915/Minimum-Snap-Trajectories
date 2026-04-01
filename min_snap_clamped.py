@@ -1,7 +1,7 @@
 '''
 Visual and simple computational 
 representation of snap minimization
-using B-Splines
+using clamped B-Splines
 
 TO DO:
 - Optimize 4th derivative of position (snap)
@@ -23,6 +23,7 @@ import numpy as np
 from numpy.linalg import inv
 import matplotlib.pyplot as plt
 from scipy.interpolate import BSpline
+import time
 
 # ==========================================
 # PLOTTING FUNCTIONS
@@ -97,25 +98,11 @@ class MinSnapEval:
     using B-Splines
     '''
 
-    def __init__(self, initial_states, final_states, num_control_points, degree):
+    def __init__(self, num_control_points, degree):
         start_time = 0
-        
-        # 1. Define your placeholder initial states (Start at origin, at rest)
-        p0 = initial_states[0]  # Initial position (X, Y, Z)
-        v0 = initial_states[1]  # Initial velocity
-        a0 = initial_states[2]  # Initial acceleration
-
-        # 2. Define your placeholder final states (End at target, at rest)
-        pf = final_states[0]   # Final position (X, Y, Z)
-        vf = final_states[1]   # Final velocity
-        af = final_states[2]   # Final acceleration
 
         self.knots = self._create_clamped_knot_points(num_control_points, degree, start_time)
-
-        # 3. Glue them together horizontally to build Ap
-        # Order: [p0, v0, a0, af, vf, pf]
-        A_p = np.hstack((p0, v0, a0, af, vf, pf))
-        # print(f"A_p = {A_p}\n")
+        
         B_d_3 = self._get_B_d3_matrix(degree)
 
         S_d4_M, snap_knots = self._get_S_matrix(degree, degree, self.knots, num_control_points)
@@ -123,13 +110,11 @@ class MinSnapEval:
         U1, U2 = self._get_U_matrices(num_control_points)
 
         Q_d4_M = B_d_3 @ U1.T @ (np.eye(num_control_points) - W_d4_M @ U2 @ inv(U2.T@W_d4_M@U2) @ U2.T)
-
-        C_p = A_p @ Q_d4_M
         
-        self.optimized_ctrl_pts = C_p
+        self.Q_d4_M = Q_d4_M
 
-    def min_snap_ctrl_pts(self):
-        return self.optimized_ctrl_pts
+    def get_Q_matrix(self):
+        return self.Q_d4_M
 
     # --- Internal Class Methods ---
 
@@ -208,32 +193,22 @@ class MinSnapEval:
 # ==========================================
 
 class MinCourseEval:
-    def __init__(self, initial_states, final_states, num_control_points, degree):
-        start_time = 0
-        
-        # 1. Define your placeholder initial states
-        psi0 = initial_states[0]  
-        
-        # 2. Define your placeholder final states
-        psif = final_states[0]   
+    def __init__(self, num_control_points, degree):
+        start_time = 0  
 
         self.knots = self._create_clamped_knot_points(num_control_points, degree, start_time)
 
-        # 3. Glue them together horizontally to build Ap
-        A_p = np.hstack((psi0, psif))
 
         S_d2_M, snap_knots = self._get_S_matrix(degree, degree, self.knots, num_control_points)
         W_d2_M = self._get_W_matrix(S_d2_M, snap_knots)
         U1_psi, U2_psi = self._get_U_matrices_course(num_control_points)
 
         Q_d2_M = U1_psi.T @ (np.eye(num_control_points) - W_d2_M @ U2_psi @ inv(U2_psi.T@W_d2_M@U2_psi) @ U2_psi.T)
-
-        C_p = A_p @ Q_d2_M
         
-        self.optimized_ctrl_pts = C_p
+        self.Q_d2_M = Q_d2_M
 
-    def min_course_ctrl_pts(self):
-        return self.optimized_ctrl_pts
+    def get_Q_matrix(self):
+        return self.Q_d2_M
 
     # --- Internal Class Methods ---
 
@@ -293,6 +268,72 @@ class MinCourseEval:
         U2 = I[:, 1:-1]
         return U1, U2
 
+def run_batch_performance_test():
+        # The number of random trajectories we want to compute in each batch
+        batch_sizes = [10, 100, 1000, 5000, 10000, 50000, 100000, 500000, 1000000]
+        
+        execution_times = []
+        
+        # Static physics parameters
+        snap_degree = 4
+        snap_ctrl_pts = 11
+
+        print("\nPre-computing Q Matrix once for all batches...")
+        evaluator = MinSnapEval(snap_ctrl_pts, snap_degree)
+        Q_d4_M = evaluator.get_Q_matrix()
+        
+        print("\nRunning Batch Execution Test...")
+        
+        for num_trajectories in batch_sizes:
+            print(f"Calculating {num_trajectories:,} random trajectories...")
+            
+            # --- START TIMER ---
+            start_exec = time.perf_counter()
+            
+            # Simulate the drone rapidly calculating new paths
+            for _ in range(num_trajectories):
+                # Generate random physical states
+                p0 = np.random.rand(3, 1) * 10 
+                v0 = np.random.rand(3, 1) * 5 - 2.5
+                a0 = np.random.rand(3, 1) * 2 - 1
+                
+                pf = np.random.rand(3, 1) * 10 
+                vf = np.random.rand(3, 1) * 5 - 2.5
+                af = np.random.rand(3, 1) * 2 - 1
+                
+                A_p = np.hstack((p0, v0, a0, af, vf, pf))
+                
+                # The core calculation
+                C_p = A_p @ Q_d4_M
+                
+            # --- STOP TIMER ---
+            end_exec = time.perf_counter()
+            
+            total_time = end_exec - start_exec
+            execution_times.append(total_time)
+
+        # ==========================================
+        # PLOT THE RESULTS
+        # ==========================================
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        ax.plot(batch_sizes, execution_times, 'g-o', linewidth=2, markersize=6)
+        
+        # Format the graph
+        ax.set_title('Batch Processing Time for Minimum Snap Trajectories', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Number of Trajectories Computed', fontsize=12)
+        ax.set_ylabel('Total Computation Time (seconds)', fontsize=12)
+        
+        # Use a standard decimal format for the X-axis instead of scientific notation
+        ax.ticklabel_format(style='plain', axis='x')
+        
+        # Add a grid and start axes at 0
+        ax.grid(True, linestyle='--', alpha=0.7)
+        ax.set_xlim(left=0)
+        ax.set_ylim(bottom=0)
+        
+        plt.tight_layout()
+        plt.show()
 
 # ==========================================
 # MAIN EXECUTION
@@ -305,24 +346,48 @@ if __name__ == "__main__":
     # -------------------------
     snap_degree = 4
     snap_ctrl_pts = 11
+
+    # Pre-compute the Q matrix (This simulates the drone "booting up" on the ground)
+    print("Pre-computing Q Matrix...")
+    min_snap_evaluator = MinSnapEval(snap_ctrl_pts, snap_degree)
+    Q_d4_M = min_snap_evaluator.get_Q_matrix()
+
+    print("\n--- Running Performance Test: 100 Random Trajectories ---")
     
-    p0 = np.array([[0], [0], [0]])  # Initial position (X, Y, Z)
-    v0 = np.array([[3], [0], [8]])  # Initial velocity
-    a0 = np.array([[3], [0], [5]])  # Initial acceleration
+    # Start the high-precision timer
+    start_time = time.perf_counter()
 
-    pf = np.array([[-10], [10], [15]]) # Final position (X, Y, Z)
-    vf = np.array([[10], [0], [-10]])  # Final velocity
-    af = np.array([[-5], [0], [-3]])   # Final acceleration
+    for i in range(100):
+        # Generate random 3x1 column vectors for the states
+        # The scalars give them reasonable physical ranges (e.g., 0 to 10 meters for position)
+        p0 = np.random.rand(3, 1) * 10 
+        v0 = np.random.rand(3, 1) * 5 - 2.5
+        a0 = np.random.rand(3, 1) * 2 - 1
+        
+        pf = np.random.rand(3, 1) * 10 
+        vf = np.random.rand(3, 1) * 5 - 2.5
+        af = np.random.rand(3, 1) * 2 - 1
+        
+        # Build the boundary constraint matrix
+        A_p = np.hstack((p0, v0, a0, af, vf, pf))
+        
+        # Calculate the exact optimal 3D flight path in a single dot product
+        C_p_snap = A_p @ Q_d4_M
+        
+    # Stop the timer
+    end_time = time.perf_counter()
+    
+    # Calculate and print the results
+    total_time = end_time - start_time
+    avg_time = total_time / 100
+    
+    print(f"Total time for 100 trajectories: {total_time:.6f} seconds")
+    print(f"Average time per trajectory: {avg_time:.6f} seconds ({avg_time * 1000:.3f} ms)")
 
-    initial_states_snap = np.array([p0, v0, a0])
-    final_states_snap = np.array([pf, vf, af])
-    min_snap_evaluator = MinSnapEval(initial_states_snap, final_states_snap, snap_ctrl_pts, snap_degree)
 
-    snap_optimized_pts = min_snap_evaluator.min_snap_ctrl_pts()
-    print("\n--- 3D Minimum Snap Control Points ---")
-    print(snap_optimized_pts)
-
-    plot_trajectory(snap_optimized_pts, min_snap_evaluator.knots, snap_degree)
+    # print("\n--- 3D Minimum Snap Control Points ---")
+    # print(C_p_snap)
+    # plot_trajectory(C_p_snap, min_snap_evaluator.knots, snap_degree)
 
     # -------------------------
     # 2. RUN COURSE OPTIMIZATION
@@ -330,16 +395,40 @@ if __name__ == "__main__":
     course_degree = 2
     course_ctrl_pts = 11
 
-    psi0 = np.array([[0]])
-    psif = np.array([[75]])
+    # Pre-compute the Course Q matrix
+    print("\nPre-computing Course Q Matrix...")
+    min_course_evaluator = MinCourseEval(course_ctrl_pts, course_degree)
+    Q_d2_M = min_course_evaluator.get_Q_matrix()
+    
+    print("\n--- Running Performance Test: 100 Random Course Trajectories ---")
+    
+    # Start the high-precision timer
+    start_time_course = time.perf_counter()
+    
+    for i in range(100):
+        # Generate random 1x1 column vectors for the yaw states
+        # The math: [0.0 to 1.0] * 360 - 180 = Random angle between -180 and 180 degrees
+        psi0 = np.random.rand(1, 1) * 360 - 180
+        psif = np.random.rand(1, 1) * 360 - 180
+        
+        # Build the boundary constraint matrix (Just 2 items!)
+        A_p_course = np.hstack((psi0, psif))
+        
+        # Calculate the exact optimal 1D yaw path in a single dot product
+        C_p_course = A_p_course @ Q_d2_M
+        
+    # Stop the timer
+    end_time_course = time.perf_counter()
+    
+    # Calculate and print the results
+    total_time_course = end_time_course - start_time_course
+    avg_time_course = total_time_course / 100
+    
+    print(f"Total time for 100 yaw trajectories: {total_time_course:.6f} seconds")
+    print(f"Average time per yaw trajectory: {avg_time_course:.6f} seconds ({avg_time_course * 1000:.3f} ms)")
 
-    initial_states_course = np.array([psi0])
-    final_states_course = np.array([psif])
+    # print("\n--- 1D Minimum Course Control Points ---")
+    # print(C_p)
+    # plot_course_trajectory(C_p_course, min_course_evaluator.knots, course_degree)
 
-    min_course_evaluator = MinCourseEval(initial_states_course, final_states_course, course_ctrl_pts, course_degree)
-
-    course_optimized_pts = min_course_evaluator.min_course_ctrl_pts()
-    print("\n--- 1D Minimum Course Control Points ---")
-    print(course_optimized_pts)
-
-    plot_course_trajectory(course_optimized_pts, min_course_evaluator.knots, course_degree)
+    run_batch_performance_test()
