@@ -95,7 +95,7 @@ class MinSnapEval:
         
         # Calculate Q using the solved X block instead of the inv() function
         self.Q = V @ inv(Sigma) @ U1.T @ (eye(num_control_points) - X @ U2.T)
-                
+
 
     def get_Q_matrix(self):
         return self.Q
@@ -196,7 +196,75 @@ class MinSnapEval:
         
         return W
 
+def run_batch_performance_test():
+    # The number of random trajectories we want to compute in each batch
+    batch_sizes = [10, 100, 1000, 5000, 10000, 50000, 100000, 500000, 1000000]
+    
+    execution_times = []
+    
+    # Static physics parameters
+    snap_degree = 4
+    snap_ctrl_pts = 11
 
+    print("\nPre-computing Q Matrix once for all batches...")
+    evaluator = MinSnapEval(snap_ctrl_pts, snap_degree)
+    Q_d4_M = evaluator.get_Q_matrix()
+    
+    print("\nRunning Batch Execution Test...")
+    
+    for num_trajectories in batch_sizes:
+        print(f"Calculating {num_trajectories:,} random trajectories...")
+        
+        # --- START TIMER ---
+        start_exec = time.perf_counter()
+        
+        # Simulate the drone rapidly calculating new paths
+        for _ in range(num_trajectories):
+            p0 = np.random.rand(3, 1) * 10 
+            v0 = np.random.rand(3, 1) * 5 - 2.5
+            a0 = np.random.rand(3, 1) * 2 - 1
+            
+            pf = np.random.rand(3, 1) * 10 
+            vf = np.random.rand(3, 1) * 5 - 2.5
+            af = np.random.rand(3, 1) * 2 - 1
+            
+            # Build the boundary constraint matrix
+            S = np.hstack((p0, v0, a0))
+            E = np.hstack((pf, vf, af))
+            SE = np.hstack((S, E))
+
+            # C* = [S E] @ Q
+            # This single dot product instantly bends all 11 control points to minimize snap!
+            C_p_snap = SE @ Q_d4_M
+            
+        # --- STOP TIMER ---
+        end_exec = time.perf_counter()
+        
+        total_time = end_exec - start_exec
+        execution_times.append(total_time)
+
+    # ==========================================
+    # PLOT THE RESULTS
+    # ==========================================
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    ax.plot(batch_sizes, execution_times, 'g-o', linewidth=2, markersize=6)
+    
+    # Format the graph
+    ax.set_title('Batch Processing Time for Natural Uniform Minimum Snap Trajectories', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Number of Trajectories Computed', fontsize=12)
+    ax.set_ylabel('Total Computation Time (seconds)', fontsize=12)
+    
+    # Use a standard decimal format for the X-axis instead of scientific notation
+    ax.ticklabel_format(style='plain', axis='x')
+    
+    # Add a grid and start axes at 0
+    ax.grid(True, linestyle='--', alpha=0.7)
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+    
+    plt.tight_layout()
+    plt.show()
 
 # ==========================================
 # MAIN EXECUTION
@@ -255,7 +323,6 @@ if __name__ == "__main__":
     # print(C_p_snap)
     # print("Shape:", C_p_snap.shape)
 
-    plot_trajectory(C_p_snap, min_snap_evaluator.knots, snap_degree)
+    # plot_trajectory(C_p_snap, min_snap_evaluator.knots, snap_degree)
 
-
-    
+    run_batch_performance_test()

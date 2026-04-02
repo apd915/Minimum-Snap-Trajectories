@@ -320,7 +320,7 @@ def run_batch_performance_test():
         ax.plot(batch_sizes, execution_times, 'g-o', linewidth=2, markersize=6)
         
         # Format the graph
-        ax.set_title('Batch Processing Time for Minimum Snap Trajectories', fontsize=14, fontweight='bold')
+        ax.set_title('Batch Processing Time for Clamped Uniform Minimum Snap Trajectories', fontsize=14, fontweight='bold')
         ax.set_xlabel('Number of Trajectories Computed', fontsize=12)
         ax.set_ylabel('Total Computation Time (seconds)', fontsize=12)
         
