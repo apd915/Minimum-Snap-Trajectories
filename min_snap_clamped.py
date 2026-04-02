@@ -95,7 +95,7 @@ class MinSnapEval:
     '''
     Visual and simple computational 
     representation of snap minimization
-    using B-Splines
+    using clamped uniform B-Splines
     '''
 
     def __init__(self, num_control_points, degree):
