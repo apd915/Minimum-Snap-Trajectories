@@ -353,61 +353,62 @@ def run_performance_benchmark(max_control_points=100, iterations=1000, degree=4)
 # MAIN EXECUTION
 # ==========================================
 
-# if __name__ == "__main__":
+if __name__ == "__main__":
 
-#     # -------------------------
-#     # 1. RUN SNAP OPTIMIZATION
-#     # -------------------------
+    # -------------------------
+    # 1. RUN SNAP OPTIMIZATION
+    # -------------------------
 
-#     snap_degree = 4
-#     snap_ctrl_pts = 11
+    snap_degree = 4
+    snap_ctrl_pts = 11
 
-#     # Pre-compute the Q matrix (This simulates the drone "booting up" on the ground)
-#     print("Pre-computing Q Matrix...")
-#     min_snap_evaluator = MinSnapEval(snap_ctrl_pts, snap_degree)
-#     knots = min_snap_evaluator.knots
-#     Q_d4_M = min_snap_evaluator.get_Q_matrix()
+    # Pre-compute the Q matrix (This simulates the drone "booting up" on the ground)
+    print("Pre-computing Q Matrix...")
+    min_snap_evaluator = MinSnapEval(snap_ctrl_pts, snap_degree)
+    knots = min_snap_evaluator.knots
+    Q_d4_M = min_snap_evaluator.get_Q_matrix()
 
 
-#     # Start the high-precision timer
-#     start_time = time.perf_counter()
+    # Start the high-precision timer
+    start_time = time.perf_counter()
 
-#     for i in range(100):
-#         p0 = np.random.rand(3, 1) * 10 
-#         v0 = np.random.rand(3, 1) * 5 - 2.5
-#         a0 = np.random.rand(3, 1) * 2 - 1
+    for i in range(100):
+        p0 = np.random.rand(3, 1) * 10 
+        v0 = np.random.rand(3, 1) * 5 - 2.5
+        a0 = np.random.rand(3, 1) * 2 - 1
         
-#         pf = np.random.rand(3, 1) * 10 
-#         vf = np.random.rand(3, 1) * 5 - 2.5
-#         af = np.random.rand(3, 1) * 2 - 1
+        pf = np.random.rand(3, 1) * 10 
+        vf = np.random.rand(3, 1) * 5 - 2.5
+        af = np.random.rand(3, 1) * 2 - 1
         
-#         # Build the boundary constraint matrix
-#         S = np.hstack((p0, v0, a0))
-#         E = np.hstack((pf, vf, af))
-#         SE = np.hstack((S, E))
+        # Build the boundary constraint matrix
+        S = np.hstack((p0, v0, a0))
+        E = np.hstack((pf, vf, af))
+        SE = np.hstack((S, E))
 
-#         # C* = [S E] @ Q
-#         # This single dot product instantly bends all 11 control points to minimize snap!
-#         C_p_snap = SE @ Q_d4_M
+        # C* = [S E] @ Q
+        # This single dot product instantly bends all 11 control points to minimize snap!
+        C_p_snap = SE @ Q_d4_M
         
-#     # Stop the timer
-#     end_time = time.perf_counter()
+    # Stop the timer
+    end_time = time.perf_counter()
 
-#     # Calculate and print the results
-#     total_time = end_time - start_time
-#     avg_time = total_time / 100
+    # Calculate and print the results
+    total_time = end_time - start_time
+    avg_time = total_time / 100
     
-#     print(f"Total time for 100 trajectories: {total_time:.6f} seconds")
-#     print(f"Average time per trajectory: {avg_time:.6f} seconds ({avg_time * 1000:.3f} ms)")
+    print(f"Total time for 100 trajectories: {total_time:.6f} seconds")
+    print(f"Average time per trajectory: {avg_time:.6f} seconds ({avg_time * 1000:.3f} ms)")
 
-    # print("\n==========================================")
-    # print("🚀 OPTIMAL CONTROL POINTS (C*) GENERATED:")
-    # print("==========================================")
-    # print(C_p_snap)
-    # print("Shape:", C_p_snap.shape)
+    print("\n==========================================")
+    print("🚀 OPTIMAL CONTROL POINTS (C*) GENERATED:")
+    print("==========================================")
+    print(C_p_snap)
+    print("Shape:", C_p_snap.shape)
 
-    # plot_trajectory(C_p_snap, min_snap_evaluator.knots, snap_degree)
+    plot_trajectory(C_p_snap, min_snap_evaluator.knots, snap_degree)
 
-    # run_batch_performance_test()
 
-run_performance_benchmark()
+# run_batch_performance_test()
+
+# run_performance_benchmark()
