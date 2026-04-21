@@ -41,30 +41,56 @@ class MinSnapEval:
     Evaluator for generating Minimum Snap Trajectories using 
     Natural Uniform B-Splines via Singular Value Decomposition (SVD).
     """
+    # ==========================================
+    # PRE-COMPUTED S-MATRIX STENCILS (Lookup Table)
+    # Key: k (Degree of the basis functions being integrated)
+    # Value: List of [Main Diagonal, 1st Off-Diagonal, 2nd Off-Diagonal...]
+    # ==========================================
+    S_STENCILS = {
+        0: [1.0],         # k=0 (Boxcars)
+        1: [2/3, 1/6],    # k=1 (Triangles)
+        # 2: [],          # k=2 (Parabolas) - To be calculated
+        # 3: [],          # k=3 (Cubics) - To be calculated
+    }
+    # ==========================================
+    # PRE-COMPUTED DERIVATIVE STENCILS (Pascal's Triangle)
+    # Key: l (The derivative order. e.g., 4 for Snap)
+    # Value: The cascaded finite difference coefficients
+    # ==========================================
+    D_STENCILS = {
+        1: [-1, 1],
+        2: [1, -2, 1],
+        3: [-1, 3, -3, 1],
+        4: [1, -4, 6, -4, 1]
+    }
 
-    def __init__(self, num_control_points, degree):
+    def __init__(self, num_segments, degree=4):
         """
         Initializes the solver and pre-computes the optimal Q matrix.
         """
-        # We enforce a minimum of 7 points because we have 6 boundary constraints (Start/End: Pos, Vel, Acc).
-        min_control_points = 6
-        if num_control_points <= min_control_points:
-            raise ValueError(
-                f"For 6 constraints, a degree {degree} spline requires at least {min_control_points + 1} "
-                f"control points to optimize. You provided {num_control_points}."
-            )
 
-        # 1. Extract the SVD boundary matrices
-        B_combined, U1, U2, Sigma, V = self._create_SVD(num_control_points)
-
-        # 2. Calculate M (number of time segments) dynamically
-        M = num_control_points - degree
+        """
+        Initializes the solver based on the desired number of flight segments (base time).
+        """
+        # 1. Intuitive Safety Check
+        if num_segments < 3:
+            raise ValueError(f"To satisfy 6 physical constraints, you need at least 3 flight segments. You provided {num_segments}.")
+            
+        # 2. Automatically calculate the required "ghost" control points
+        self.num_control_points = num_segments + degree
         
-        # Define the natural uniform knot vector (-degree to M + degree)
-        self.knots = np.arange(-degree, M + degree + 1)
+        # We store M internally since it's used to build the W/S matrices
+        self.M = num_segments
+        self.degree = degree
+        
+        # 3. Define the knot vector
+        self.knots = np.arange(-self.degree, self.M + self.degree + 1)
+
+        # 4. Extract the SVD boundary matrices (pass in the calculated control points)
+        B_combined, U1, U2, Sigma, V = self._create_SVD(self.num_control_points)
 
         # 3. Generate the dynamically sized W (penalty) matrix for the 4th derivative (Snap)
-        W = self._get_W_matrix(M)
+        W = self._get_W_matrix(self.M)
 
         # 4. Compute the Q Matrix using the Linear Solver Optimization (Section 2.7)
         # We solve the system A_bar * X_bar = B_bar to avoid taking the direct inverse 
@@ -83,7 +109,7 @@ class MinSnapEval:
         X = X_bar.T
         
         # Construct the final generalized inverse mapping matrix (Q)
-        self.Q = V @ inv(Sigma) @ U1.T @ (eye(num_control_points) - X @ U2.T)
+        self.Q = V @ inv(Sigma) @ U1.T @ (eye(self.num_control_points) - X @ U2.T)
 
     def get_Q_matrix(self):
         """Returns the pre-computed Q mapping matrix."""
@@ -161,22 +187,78 @@ class MinSnapEval:
         D[1:, :] += np.eye(cols)
         
         return D
+    
+    def _get_fast_cascaded_D_matrix(self, M, degree, derivative_order):
+        """
+        Direct O(N) LUT implementation of the book's cascaded D matrix.
+        Yields an (M+d) x (M+d-l) matrix matching the exact output of D^d * D^{d-1}...
+        """
+        if derivative_order not in self.D_STENCILS:
+            raise NotImplementedError(f"Stencil for derivative {derivative_order} not hardcoded.")
+
+        stencil = self.D_STENCILS[derivative_order]
+
+        # The book's dimensions: mapping from (M + d - l) up to (M + d)
+        rows = M + degree
+        cols = M + degree - derivative_order
+
+        D_cascaded = np.zeros((rows, cols))
+
+        # The book's D matrix cascades column-wise
+        for i in range(cols):
+            D_cascaded[i : i + len(stencil), i] = stencil
+
+        return D_cascaded
+    
+    def _get_S_matrix(self, M, k):
+        """
+        Dynamically populates the S matrix using the pre-calculated memory LUT.
+        Applies exact boundary truncation patches for splines bleeding out of [0, M].
+        """
+        if k not in self.S_STENCILS:
+            raise NotImplementedError(f"Integral stencil for k={k} is not yet hardcoded.")
+
+        size = M + k
+        S = np.zeros((size, size))
+        stencil = self.S_STENCILS[k]
+        
+        # 1. Populate the main diagonal (s_0)
+        S += np.diag(np.full(size, stencil[0]))
+        
+        # 2. Populate the sub and super diagonals (s_1, s_2, etc.)
+        for i in range(1, len(stencil)):
+            S += np.diag(np.full(size - i, stencil[i]), k=i)   # Super-diagonal
+            S += np.diag(np.full(size - i, stencil[i]), k=-i)  # Sub-diagonal
+            
+        # 3. APPLY BOUNDARY TRUNCATION PATCHES
+        if k == 1:
+            # The first and last basis functions lose exactly half their area 
+            # because they bleed outside the [0, M] integral bounds.
+            S[0, 0] = 1/3
+            S[-1, -1] = 1/3
+            
+        elif k > 1:
+            # Placeholder: The boundary patches for k=2 and higher are matrices 
+            # (e.g., a 2x2 corner block for k=2) because the overlap bleeds further.
+            raise NotImplementedError(f"Boundary patches for k={k} not yet hardcoded.")
+            
+        return S
 
     def _get_W_matrix(self, M):
         """
         Generates the Minimum Snap Penalty matrix (W) for a Natural Uniform Spline.
         Cascades 4 derivative matrices to represent the 4th derivative (Snap).
         """
-        D1 = self._get_uniform_D_matrix(M, 1)
-        D2 = self._get_uniform_D_matrix(M, 2)
-        D3 = self._get_uniform_D_matrix(M, 3)
-        D4 = self._get_uniform_D_matrix(M, 4)
-        
-        # Matrix multiplication reads right-to-left
-        D_4th = D4 @ D3 @ D2 @ D1
+        snap_minimization = 4
+
+        D_cascaded = self._get_fast_cascaded_D_matrix(M, self.degree, snap_minimization)
+
+        k = self.degree-snap_minimization
+        S = self._get_S_matrix(M, k)
         
         # W = D_4th * (Identity) * D_4th.T
-        W = D_4th @ D_4th.T
+        # W = D_4th @ S @ D_4th.T
+        W = D_cascaded @ S @ D_cascaded.T
         
         return W
 
@@ -342,11 +424,11 @@ if __name__ == "__main__":
     # ----------------------------------------------------
     # DEMO: SINGLE FLIGHT PATH GENERATION
     # ----------------------------------------------------
-    snap_degree = 4
-    snap_ctrl_pts = 11
+    degree = 4
+    snap_num_segments = 7
 
     print("Pre-computing Q Matrix...")
-    min_snap_evaluator = MinSnapEval(snap_ctrl_pts, snap_degree)
+    min_snap_evaluator = MinSnapEval(snap_num_segments, degree)
     knots = min_snap_evaluator.knots
     Q_d4_M = min_snap_evaluator.get_Q_matrix()
 
@@ -384,7 +466,7 @@ if __name__ == "__main__":
     print("Shape:", C_p_snap.shape)
 
     # Plot the last trajectory from the loop
-    plot_trajectory(C_p_snap, min_snap_evaluator.knots, snap_degree)
+    plot_trajectory(C_p_snap, min_snap_evaluator.knots, degree)
 
 
     # ----------------------------------------------------
