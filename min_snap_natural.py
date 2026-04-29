@@ -47,11 +47,12 @@ class MinSnapEval:
     # Value: List of [Main Diagonal, 1st Off-Diagonal, 2nd Off-Diagonal...]
     # ==========================================
     S_STENCILS = {
-        0: [1.0],         # k=0 (Boxcars)
-        1: [2/3, 1/6],    # k=1 (Triangles)
-        # 2: [],          # k=2 (Parabolas) - To be calculated
-        # 3: [],          # k=3 (Cubics) - To be calculated
+        0: [1.0],                           # k=0 (Boxcars)
+        1: [2/3, 1/6],                      # k=1 (Triangles)
+        2: [11/20, 13/60, 1/120], # (Note: 13/60 is exactly 26/120)          # k=2 (Parabolas) 
+        3: [151/315, 397/1680, 1/42, 1/5040],          # k=3 (Cubics) - To be calculated
     }
+
     # ==========================================
     # PRE-COMPUTED DERIVATIVE STENCILS (Pascal's Triangle)
     # Key: l (The derivative order. e.g., 4 for Snap)
@@ -169,24 +170,7 @@ class MinSnapEval:
         V = Vh.T
 
         return B_combined, U1, U2, Sigma, V
-
-    def _get_uniform_D_matrix(self, num_intervals, k):
-        """
-        Generates the discrete derivative operator matrix D_M^k.
-        For natural uniform splines, this simplifies to pure subtraction.
-        """
-        rows = num_intervals + k
-        cols = num_intervals + k - 1
-        
-        D = np.zeros((rows, cols))
-        
-        # Main diagonal (-1) represents the current control point
-        D[:-1, :] -= np.eye(cols)
-        
-        # Sub-diagonal (+1) represents the next control point
-        D[1:, :] += np.eye(cols)
-        
-        return D
+    
     
     def _get_fast_cascaded_D_matrix(self, M, degree, derivative_order):
         """
@@ -231,11 +215,49 @@ class MinSnapEval:
             S += np.diag(np.full(size - i, stencil[i]), k=-i)  # Sub-diagonal
             
         # 3. APPLY BOUNDARY TRUNCATION PATCHES
-        if k == 1:
+        if k == 1: # [[1/3, 2/3], [1/6]]
             # The first and last basis functions lose exactly half their area 
             # because they bleed outside the [0, M] integral bounds.
             S[0, 0] = 1/3
             S[-1, -1] = 1/3
+
+        elif k == 2: # [[1/20, 1/2, 11/20], [13/120, 26/120], [1/120]]
+            # Main Diagonal (b_0*b_0 and b_1*b_1)
+            S[0, 0] = 1/20
+            S[1, 1] = 1/2
+            S[-1, -1] = 1/20
+            S[-2, -2] = 1/2
+            
+            # First Off-Diagonal (b_0*b_1)
+            S[0, 1] = S[1, 0] = 13/120
+            S[-1, -2] = S[-2, -1] = 13/120
+            
+            # Note: The second off-diagonal (b_0*b_2) doesn't bleed into 
+            # negative time, so it remains the infinite value of 1/120!
+
+        elif k == 3: # [[1/252, 151/630, 599/1260, 151/315], [43/1680, 59/280, 397/1680], [1/84, 1/42], [1/5040]]
+            # 1. Main Diagonal Patches (S_0,0 / S_1,1 / S_2,2)
+            S[0, 0] = 1/252
+            S[1, 1] = 151/630
+            S[2, 2] = 599/1260
+            
+            S[-1, -1] = 1/252
+            S[-2, -2] = 151/630
+            S[-3, -3] = 599/1260
+
+            # --- First Off-Diagonal Patches ---
+            S[0, 1] = S[1, 0] = 43/1680
+            S[1, 2] = S[2, 1] = 59/280   # (Which is exactly 354/1680)
+            
+            S[-1, -2] = S[-2, -1] = 43/1680
+            S[-2, -3] = S[-3, -2] = 59/280
+
+            # --- Second Off-Diagonal Patches ---
+            S[0, 2] = S[2, 0] = 1/84
+
+            S[-1, -3] = S[-3, -1] = 1/84
+
+
             
         elif k > 1:
             # Placeholder: The boundary patches for k=2 and higher are matrices 
@@ -255,8 +277,8 @@ class MinSnapEval:
 
         k = self.degree-snap_minimization
         S = self._get_S_matrix(M, k)
+        # print(f'S Matrix:\n{S}')
         
-        # W = D_4th * (Identity) * D_4th.T
         # W = D_4th @ S @ D_4th.T
         W = D_cascaded @ S @ D_cascaded.T
         
@@ -424,7 +446,7 @@ if __name__ == "__main__":
     # ----------------------------------------------------
     # DEMO: SINGLE FLIGHT PATH GENERATION
     # ----------------------------------------------------
-    degree = 4
+    degree = 7
     snap_num_segments = 7
 
     print("Pre-computing Q Matrix...")
@@ -459,14 +481,8 @@ if __name__ == "__main__":
     print(f"Total time for 100 trajectories: {total_time:.6f} seconds")
     print(f"Average time per trajectory: {avg_time:.6f} seconds ({avg_time * 1000:.3f} ms)")
 
-    print("\n==========================================")
-    print("🚀 OPTIMAL CONTROL POINTS (C*) GENERATED:")
-    print("==========================================")
-    print(C_p_snap)
-    print("Shape:", C_p_snap.shape)
-
     # Plot the last trajectory from the loop
-    plot_trajectory(C_p_snap, min_snap_evaluator.knots, degree)
+    # plot_trajectory(C_p_snap, min_snap_evaluator.knots, degree)
 
 
     # ----------------------------------------------------
@@ -474,5 +490,5 @@ if __name__ == "__main__":
     # (Uncomment the lines below to run them)
     # ----------------------------------------------------
     
-    # run_batch_performance_test()
-    # run_performance_benchmark(max_control_points=100)
+    run_batch_performance_test()
+    run_performance_benchmark(max_control_points=100)
