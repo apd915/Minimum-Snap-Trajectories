@@ -6,6 +6,11 @@ SNAP OPTIMIZATION:
 - C_p = [S E] @ Q_d4_M
 - S = [ p(0) dp(0)/dt d^2p(0)/dt^2 ]
 - E = [ p(M) dp(M)/dt d^2p(M)/dt^2 ]
+
+C++ for Deployment: When you eventually wrap this into a ROS C++ node
+for the physical quadcopter, you will swap back to Cholesky, 
+use fixed-size Eigen matrices, and achieve sub-microsecond 
+trajectory generation.
 """
 
 # ==========================================
@@ -477,7 +482,7 @@ if __name__ == "__main__":
     # DEMO: SINGLE FLIGHT PATH GENERATION
     # ----------------------------------------------------
     degree = 4
-    snap_num_segments = 7
+    snap_num_segments = 1000
 
     print("Pre-computing Q Matrix...")
     min_snap_evaluator = MinSnapEval(snap_num_segments, degree)
