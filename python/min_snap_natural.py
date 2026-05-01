@@ -6,31 +6,24 @@ SNAP OPTIMIZATION:
 - C_p = [S E] @ Q_d4_M
 - S = [ p(0) dp(0)/dt d^2p(0)/dt^2 ]
 - E = [ p(M) dp(M)/dt d^2p(M)/dt^2 ]
+
+C++ for Deployment: When you eventually wrap this into a ROS C++ node
+for the physical quadcopter, you will swap back to Cholesky, 
+use fixed-size Eigen matrices, and achieve sub-microsecond 
+trajectory generation.
 """
 
 # ==========================================
 # IMPORTS
 # ==========================================
 import time
+import math
 import numpy as np
 from numpy import eye
 from numpy.linalg import inv
 import matplotlib.pyplot as plt
 from scipy.interpolate import BSpline
-
-
-# ==========================================
-# MATHEMATICAL CONSTANTS
-# ==========================================
-# M4: The basis matrix for a degree 4 (quartic) B-spline.
-# Used to map control points to specific spatial/derivative constraints.
-M4 = np.array([
-    [ 1,  -4,   6,  -4,   1],
-    [-4,  12,  -6, -12,  11],
-    [ 6, -12,  -6,  12,  11],
-    [-4,   4,   6,   4,   1],
-    [ 1,   0,   0,   0,   0]
-]) / 24.0
+from b_spline_constants import M_STENCILS, S_STENCILS, D_STENCILS, T_STENCILS
 
 
 # ==========================================
@@ -41,39 +34,14 @@ class MinSnapEval:
     Evaluator for generating Minimum Snap Trajectories using 
     Natural Uniform B-Splines via Singular Value Decomposition (SVD).
     """
-    # ==========================================
-    # PRE-COMPUTED S-MATRIX STENCILS (Lookup Table)
-    # Key: k (Degree of the basis functions being integrated)
-    # Value: List of [Main Diagonal, 1st Off-Diagonal, 2nd Off-Diagonal...]
-    # ==========================================
-    S_STENCILS = {
-        0: [1.0],                           # k=0 (Boxcars)
-        1: [2/3, 1/6],                      # k=1 (Triangles)
-        2: [11/20, 13/60, 1/120], # (Note: 13/60 is exactly 26/120)          # k=2 (Parabolas) 
-        3: [151/315, 397/1680, 1/42, 1/5040],          # k=3 (Cubics) - To be calculated
-    }
-
-    # ==========================================
-    # PRE-COMPUTED DERIVATIVE STENCILS (Pascal's Triangle)
-    # Key: l (The derivative order. e.g., 4 for Snap)
-    # Value: The cascaded finite difference coefficients
-    # ==========================================
-    D_STENCILS = {
-        1: [-1, 1],
-        2: [1, -2, 1],
-        3: [-1, 3, -3, 1],
-        4: [1, -4, 6, -4, 1]
-    }
 
     def __init__(self, num_segments, degree=4):
         """
-        Initializes the solver and pre-computes the optimal Q matrix.
-        """
-
-        """
         Initializes the solver based on the desired number of flight segments (base time).
         """
-        # 1. Intuitive Safety Check
+        # 1. Intuitive Safety Checks
+        if degree < 4:
+            raise ValueError(f"Minimum Snap requires a polynomial of at least degree 4. You provided degree {degree}.")
         if num_segments < 3:
             raise ValueError(f"To satisfy 6 physical constraints, you need at least 3 flight segments. You provided {num_segments}.")
             
@@ -115,43 +83,110 @@ class MinSnapEval:
     def get_Q_matrix(self):
         """Returns the pre-computed Q mapping matrix."""
         return self.Q
+    
+
+    def _get_M_matrix(self, degree):
+        """
+        Dynamically generates the Basis Mapping Matrix (M) for ANY degree uniform B-spline.
+        Maps control points to polynomial coefficients for tau in [0, 1].
+        """
+        M = np.zeros((degree + 1, degree + 1), dtype=int)
+        
+        for r in range(degree + 1):
+            for j in range(degree + 1):
+                val = 0
+                for k in range(degree - r + 1):
+                    term1 = (-1)**k
+                    term2 = math.comb(degree + 1, k)
+                    term3 = math.comb(degree, j)
+                    
+                    # Handle 0^0 safely
+                    base = degree - r - k
+                    term4 = (base**j) if not (base == 0 and j == 0) else 1
+                    
+                    val += term1 * term2 * term3 * term4
+                    
+                M[r, j] = val
+        
+        scalar = math.factorial(degree)
+        return M, scalar
+
+
+    def _get_T_vector(self, degree, derivative_order, tau):
+        """
+        Dynamically generates the Time vector T(tau) and its derivatives.
+        """
+        T = np.zeros((degree + 1, 1))
+        for i in range(degree + 1):
+            power = degree - i
+            if power >= derivative_order:
+                # Calculate the cascaded derivative scalar using the power rule
+                scalar = math.prod(range(power - derivative_order + 1, power + 1)) if derivative_order > 0 else 1
+                T[i, 0] = scalar * (tau ** (power - derivative_order))
+        return T
+    
+    def _get_boundary_states(self, M_matrix, degree):
+        """
+        Calculates the active constraint blocks for the start (tau=0) 
+        and end (tau=1) of the trajectory using a hybrid lookup/dynamic approach.
+        """
+        # --- FAST PATH: Hardcoded Lookup ---
+        if degree in T_STENCILS:
+            T_start_combined = T_STENCILS[degree]['start']
+            T_end_combined = T_STENCILS[degree]['end']
+            
+            # Execute a single matrix multiplication for all 3 constraints simultaneously
+            B_d_M0 = M_matrix @ T_start_combined
+            B_d_MM = M_matrix @ T_end_combined
+            
+            return B_d_M0, B_d_MM
+
+        # --- FALLBACK PATH: Dynamic Generation ---
+        # TAU = 0 (Start Constraints)
+        start_pos = self._get_T_vector(degree, 0, 0)
+        start_vel = self._get_T_vector(degree, 1, 0)
+        start_acc = self._get_T_vector(degree, 2, 0)
+        T_start_combined = np.hstack((start_pos, start_vel, start_acc))
+        B_d_M0 = M_matrix @ T_start_combined
+
+        # TAU = 1 (End Constraints)
+        end_pos = self._get_T_vector(degree, 0, 1)
+        end_vel = self._get_T_vector(degree, 1, 1)
+        end_acc = self._get_T_vector(degree, 2, 1)
+        T_end_combined = np.hstack((end_pos, end_vel, end_acc))
+        B_d_MM = M_matrix @ T_end_combined
+
+        return B_d_M0, B_d_MM
+
 
     def _create_SVD(self, num_control_points):
         """
         Constructs the boundary constraint matrices and performs SVD to isolate
         the null space (free control points) for snap optimization.
         """
-        # --- TAU = 0 (Start Constraints) ---
-        T_pos_0 = np.array([[0], [0], [0], [0], [1]])
-        T_vel_0 = np.array([[0], [0], [0], [1], [0]])
-        T_acc_0 = np.array([[0], [0], [2], [0], [0]])
+        
+        # --- 1. RESOLVE THE M MATRIX ---
+        if self.degree in M_STENCILS:
+            # Fast Path: Memory Lookup
+            M_matrix = M_STENCILS[self.degree]
+        else:
+            # Fallback Path: Dynamic Generation
+            print(f"Warning: Generating M^{self.degree} on the fly.")
+            M_int, scalar = self._get_M_matrix(self.degree)
+            M_matrix = M_int / scalar 
 
-        start_pos = M4 @ T_pos_0
-        start_vel = M4 @ T_vel_0
-        start_acc = M4 @ T_acc_0
-
-        # 5x3 block representing the active control points at t=0
-        B_d_M0 = np.hstack((start_pos, start_vel, start_acc))
-
-        # --- TAU = 1 (End Constraints) ---
-        T_pos_1 = np.array([[1], [1], [1], [1], [1]])
-        T_vel_1 = np.array([[4], [3], [2], [1], [0]])
-        T_acc_1 = np.array([[12], [6], [2], [0], [0]])
-
-        end_pos = M4 @ T_pos_1
-        end_vel = M4 @ T_vel_1
-        end_acc = M4 @ T_acc_1
-
-        # 5x3 block representing the active control points at t=M
-        B_d_MM = np.hstack((end_pos, end_vel, end_acc))
+        # --- 2. GENERATE BOUNDARY BLOCKS ---
+        B_d_M0, B_d_MM = self._get_boundary_states(M_matrix, self.degree) # block representing the active control points at t=0 and t=M
+        
 
         # Initialize the full-size boundary matrices with zeros
         B_0_full = np.zeros((num_control_points, 3))
         B_M_full = np.zeros((num_control_points, 3))
 
-        # Paste the active blocks into their respective ends
-        B_0_full[0:5, :] = B_d_M0 
-        B_M_full[-5:, :] = B_d_MM
+        # Paste the active blocks into their respective ends# The injection window size is exactly degree + 1
+        window_size = self.degree + 1
+        B_0_full[0:window_size, :] = B_d_M0 
+        B_M_full[-window_size:, :] = B_d_MM
 
         # Glue them together horizontally for the SVD: [B(0) B(M)]
         B_combined = np.hstack((B_0_full, B_M_full))
@@ -177,10 +212,10 @@ class MinSnapEval:
         Direct O(N) LUT implementation of the book's cascaded D matrix.
         Yields an (M+d) x (M+d-l) matrix matching the exact output of D^d * D^{d-1}...
         """
-        if derivative_order not in self.D_STENCILS:
+        if derivative_order not in D_STENCILS:
             raise NotImplementedError(f"Stencil for derivative {derivative_order} not hardcoded.")
 
-        stencil = self.D_STENCILS[derivative_order]
+        stencil = D_STENCILS[derivative_order]
 
         # The book's dimensions: mapping from (M + d - l) up to (M + d)
         rows = M + degree
@@ -199,12 +234,12 @@ class MinSnapEval:
         Dynamically populates the S matrix using the pre-calculated memory LUT.
         Applies exact boundary truncation patches for splines bleeding out of [0, M].
         """
-        if k not in self.S_STENCILS:
+        if k not in S_STENCILS:
             raise NotImplementedError(f"Integral stencil for k={k} is not yet hardcoded.")
 
         size = M + k
         S = np.zeros((size, size))
-        stencil = self.S_STENCILS[k]
+        stencil = S_STENCILS[k]
         
         # 1. Populate the main diagonal (s_0)
         S += np.diag(np.full(size, stencil[0]))
@@ -258,12 +293,12 @@ class MinSnapEval:
             S[-1, -3] = S[-3, -1] = 1/84
 
 
-            
-        elif k > 1:
+        elif k > 3:
             # Placeholder: The boundary patches for k=2 and higher are matrices 
             # (e.g., a 2x2 corner block for k=2) because the overlap bleeds further.
             raise NotImplementedError(f"Boundary patches for k={k} not yet hardcoded.")
-            
+        
+        # print(f"S:\n{S}")
         return S
 
     def _get_W_matrix(self, M):
@@ -446,13 +481,17 @@ if __name__ == "__main__":
     # ----------------------------------------------------
     # DEMO: SINGLE FLIGHT PATH GENERATION
     # ----------------------------------------------------
-    degree = 7
-    snap_num_segments = 7
+    degree = 4
+    snap_num_segments = 1000
 
     print("Pre-computing Q Matrix...")
     min_snap_evaluator = MinSnapEval(snap_num_segments, degree)
     knots = min_snap_evaluator.knots
     Q_d4_M = min_snap_evaluator.get_Q_matrix()
+    
+    # for i in range(1,8):
+    #     Mi, scalar = min_snap_evaluator._get_M_matrix(i)
+    #     print(f"M^{i}: 1/{scalar}\n{Mi}\n")
 
     start_time = time.perf_counter()
 
@@ -482,7 +521,7 @@ if __name__ == "__main__":
     print(f"Average time per trajectory: {avg_time:.6f} seconds ({avg_time * 1000:.3f} ms)")
 
     # Plot the last trajectory from the loop
-    # plot_trajectory(C_p_snap, min_snap_evaluator.knots, degree)
+    plot_trajectory(C_p_snap, min_snap_evaluator.knots, degree)
 
 
     # ----------------------------------------------------
@@ -490,5 +529,5 @@ if __name__ == "__main__":
     # (Uncomment the lines below to run them)
     # ----------------------------------------------------
     
-    run_batch_performance_test()
-    run_performance_benchmark(max_control_points=100)
+    # run_batch_performance_test()
+    # run_performance_benchmark(max_control_points=100)
