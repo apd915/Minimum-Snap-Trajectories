@@ -335,6 +335,85 @@ def run_batch_performance_test():
         plt.tight_layout()
         plt.show()
 
+def run_clamped_performance_benchmark(max_control_points=100, iterations=1000, degree=4):
+    """
+    Benchmarks the setup and execution time of the CLAMPED Minimum Snap solver.
+    """
+    print(f"🚀 Starting Clamped Benchmark: 7 to {max_control_points} Control Points")
+    print(f"   Running {iterations} random trajectories per number of Control Points...\n")
+    
+    # Start at 7 points due to the 6 boundary constraints
+    ctrl_pts_range = range(7, max_control_points + 1, 2)
+    
+    setup_times_ms = []
+    exec_times_us = []
+    
+    for num_pts in ctrl_pts_range:
+        # ==========================================
+        # 1. MEASURE SETUP TIME (SVD & Solver)
+        # ==========================================
+        start_setup = time.perf_counter()
+        
+        # ---> CHANGE THIS TO YOUR ACTUAL CLAMPED CLASS NAME <---
+        evaluator = MinSnapEval(num_pts, degree) 
+        Q_matrix = evaluator.get_Q_matrix()
+        
+        end_setup = time.perf_counter()
+        
+        # Convert to milliseconds
+        setup_times_ms.append((end_setup - start_setup) * 1000)
+        
+        # ==========================================
+        # 2. PRE-GENERATE RANDOM STATES
+        # ==========================================
+
+        start_exec = time.perf_counter()
+        for _ in range(iterations):
+            p0 = np.random.rand(3, 1) * 10 
+            v0 = np.random.rand(3, 1) * 5 - 2.5
+            a0 = np.random.rand(3, 1) * 2 - 1
+            pf = np.random.rand(3, 1) * 10 
+            vf = np.random.rand(3, 1) * 5 - 2.5
+            af = np.random.rand(3, 1) * 2 - 1
+
+            A_p = np.hstack((p0, v0, a0, af, vf, pf))
+            C_optimal = A_p @ Q_matrix 
+            
+        end_exec = time.perf_counter()
+        
+        # Calculate average time per trajectory in MICROSECONDS
+        total_exec_time = end_exec - start_exec
+        avg_exec_us = (total_exec_time / iterations) * 1_000_000
+        exec_times_us.append(avg_exec_us)
+        
+        print(f"Pts: {num_pts:3d} | Setup: {setup_times_ms[-1]:8.2f} ms | Exec: {avg_exec_us:6.3f} µs")
+
+    # ==========================================
+    # 4. PLOT THE RESULTS
+    # ==========================================
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Plot 1: Setup Time
+    ax1.plot(ctrl_pts_range, setup_times_ms, 'r-o', linewidth=2)
+    ax1.set_title('Clamped Boot-up Time (Q Matrix Generation)', fontsize=12, fontweight='bold')
+    ax1.set_xlabel('Number of Control Points')
+    ax1.set_ylabel('Time (Milliseconds)')
+    ax1.grid(True, linestyle='--', alpha=0.7)
+    
+    # Plot 2: Execution Time
+    ax2.plot(ctrl_pts_range, exec_times_us, 'b-o', linewidth=2)
+    ax2.set_title('Clamped Real-Time Execution (A @ Q)', fontsize=12, fontweight='bold')
+    ax2.set_xlabel('Number of Control Points')
+    ax2.set_ylabel('Time (Microseconds)')
+    ax2.grid(True, linestyle='--', alpha=0.7)
+    
+    ax1.set_ylim(bottom=0)
+    ax2.set_ylim(bottom=0)
+    
+    plt.suptitle('Clamped Minimum Snap Performance Scaling (1000 Iterations/Number of Control Points)', fontsize=16)
+    plt.tight_layout()
+    plt.show()
+
 # ==========================================
 # MAIN EXECUTION
 # ==========================================
@@ -387,7 +466,7 @@ if __name__ == "__main__":
 
     # print("\n--- 3D Minimum Snap Control Points ---")
     # print(C_p_snap)
-    # plot_trajectory(C_p_snap, min_snap_evaluator.knots, snap_degree)
+    plot_trajectory(C_p_snap, min_snap_evaluator.knots, snap_degree)
 
     # -------------------------
     # 2. RUN COURSE OPTIMIZATION
@@ -431,4 +510,5 @@ if __name__ == "__main__":
     # print(C_p)
     # plot_course_trajectory(C_p_course, min_course_evaluator.knots, course_degree)
 
-    run_batch_performance_test()
+# run_batch_performance_test()
+# run_clamped_performance_benchmark()
