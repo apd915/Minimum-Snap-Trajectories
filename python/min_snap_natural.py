@@ -34,49 +34,43 @@ class MinSnapEval:
     """
 
     def __init__(self, num_segments, degree=4):
-        """
-        Initializes the solver based on the desired number of flight segments (base time).
-        """
         # 1. Intuitive Safety Checks
         if degree < 4:
             raise ValueError(f"Minimum Snap requires a polynomial of at least degree 4. You provided degree {degree}.")
         if num_segments < 3:
             raise ValueError(f"To satisfy 6 physical constraints, you need at least 3 flight segments. You provided {num_segments}.")
-            
-        # 2. Automatically calculate the required "ghost" control points
-        self.num_control_points = num_segments + degree
         
-        # We store M internally since it's used to build the W/S matrices
-        self.M = num_segments
         self.degree = degree
-        
-        # 3. Define the knot vector
+        # Only initialize state here, do NOT do the math yet.
+        self.update_segments(num_segments)
+
+    def update_segments(self, new_num_segments):
+        """
+        Updates the segment count and recalculates the structural matrices.
+        Call this if the optimizer needs to add segments to satisfy a constraint.
+        """
+        self.M = new_num_segments
+        self.num_control_points = self.M + self.degree
         self.knots = np.arange(-self.degree, self.M + self.degree + 1)
+        
+        # Now trigger the heavy math
+        self._calculate_Q()
 
-        # 4. Extract the SVD boundary matrices (pass in the calculated control points)
+    def _calculate_Q(self):
+        """
+        Internal method to compute the Q mapping matrix via SVD.
+        """
         B_combined, U1, U2, Sigma, V = self._create_SVD(self.num_control_points)
-
-        # 3. Generate the dynamically sized W (penalty) matrix for the 4th derivative (Snap)
         W = self._get_W_matrix(self.M)
-
-        # 4. Compute the Q Matrix using the Linear Solver Optimization (Section 2.7)
-        # We solve the system A_bar * X_bar = B_bar to avoid taking the direct inverse 
-        # of large matrices, maximizing computational efficiency and stability.
         
-        # A_bar = (U2^T * W * U2)^T
         A_bar = (U2.T @ W @ U2).T
-        
-        # B_bar = (W * U2)^T
         B_bar = (W @ U2).T
         
-        # Solve the linear system
         X_bar = np.linalg.solve(A_bar, B_bar)
-        
-        # Transpose back to get our final X block
         X = X_bar.T
         
-        # Construct the final generalized inverse mapping matrix (Q)
-        self.Q = V @ inv(Sigma) @ U1.T @ (eye(self.num_control_points) - X @ U2.T)
+        self.Q = V @ np.linalg.inv(Sigma) @ U1.T @ (np.eye(self.num_control_points) - X @ U2.T)
+
 
     def get_Q_matrix(self):
         """Returns the pre-computed Q mapping matrix."""
@@ -371,6 +365,6 @@ if __name__ == "__main__":
     # (Uncomment the lines below to run them)
     # ----------------------------------------------------
     #
-    # from benchmarks import run_batch_performance_test, run_performance_benchmark
-    # run_batch_performance_test()
-    # run_performance_benchmark(max_control_points=100)
+    from benchmarks import run_batch_performance_test, run_performance_benchmark
+    run_batch_performance_test()
+    run_performance_benchmark(max_control_points=100)
