@@ -343,7 +343,11 @@ if __name__ == "__main__":
         SE = np.hstack((S, E))
 
         # Core optimization calculation
-        C_p_snap = SE @ Q_d4_M
+        C_p_min_snap = SE @ Q_d4_M
+        
+        V_cp = C_p_min_snap @ min_snap_evaluator._get_fast_cascaded_D_matrix(snap_num_segments, degree, 1)
+        A_cp = C_p_min_snap @ min_snap_evaluator._get_fast_cascaded_D_matrix(snap_num_segments, degree, 2)
+
         
     end_time = time.perf_counter()
 
@@ -355,7 +359,7 @@ if __name__ == "__main__":
 
     # Plot the last trajectory from the loop
     from visualization import plot_trajectory
-    plot_trajectory(C_p_snap, min_snap_evaluator.knots, degree, minvo_stencils=MINVO_STENCILS)
+    plot_trajectory(C_p_min_snap, min_snap_evaluator.knots, degree, minvo_stencils=MINVO_STENCILS)
 
 
     # ----------------------------------------------------

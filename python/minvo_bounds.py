@@ -43,9 +43,9 @@ F7 = np.array([[0.00022428031175139061285260626677095,    0.00013513874256402826
             [-0.0000021869677709226337744440535293076, -0.0000040323323856154789413751338051599, -0.0000039355521071470918751517887926294, -0.0000077356098441786850369139886516143,  -0.000006886557963029641619274086529499,   0.000020709635337561553818374320063958,    0.00013513874256402826186596446559443,    0.00022428031175139061285260626677095]]).T
 
 # ==========================================
-# PRE-COMPUTED BASIS MATRICES (M Matrices)
-# Key: k (Degree of the basis functions)
-# Value: The M matrix used to map control points to polynomial states
+# PRE-COMPUTED MINVO MATRICES (F Matrices)
+# Key: d (Degree of the basis functions)
+# Value: The F matrix used to map sliding window of control points to MINVO bound
 # ==========================================
 MINVO_STENCILS = {
     1: F1,    
