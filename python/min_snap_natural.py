@@ -19,10 +19,8 @@ trajectory generation.
 import time
 import math
 import numpy as np
-from numpy import eye
-from numpy.linalg import inv
 from b_spline_constants import M_STENCILS, S_STENCILS, D_STENCILS, T_STENCILS
-
+from minvo_bounds import MINVO_STENCILS
 
 # ==========================================
 # CORE SOLVER CLASS
@@ -320,8 +318,8 @@ if __name__ == "__main__":
     # ----------------------------------------------------
     # DEMO: SINGLE FLIGHT PATH GENERATION
     # ----------------------------------------------------
-    degree = 4
-    snap_num_segments = 100
+    degree = 7
+    snap_num_segments = 10
 
     print("Pre-computing Q Matrix...")
     min_snap_evaluator = MinSnapEval(snap_num_segments, degree)
@@ -357,7 +355,7 @@ if __name__ == "__main__":
 
     # Plot the last trajectory from the loop
     from visualization import plot_trajectory
-    plot_trajectory(C_p_snap, min_snap_evaluator.knots, degree)
+    plot_trajectory(C_p_snap, min_snap_evaluator.knots, degree, minvo_stencils=MINVO_STENCILS)
 
 
     # ----------------------------------------------------
@@ -366,5 +364,5 @@ if __name__ == "__main__":
     # ----------------------------------------------------
     #
     from benchmarks import run_batch_performance_test, run_performance_benchmark
-    run_batch_performance_test()
-    run_performance_benchmark(max_control_points=100)
+    # run_batch_performance_test()
+    # run_performance_benchmark(max_control_points=100)
