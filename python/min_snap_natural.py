@@ -60,7 +60,7 @@ class MinSnapEval:
         Internal method to compute the Q mapping matrix via SVD.
         """
         self.B_combined, U1, U2, Sigma, V = self._create_SVD(self.num_control_points)
-        W = self.get_W_matrix(self.M)
+        W = self.get_W_matrix()
         
         A_bar = (U2.T @ W @ U2).T
         B_bar = (W @ U2).T
@@ -338,7 +338,7 @@ def run_qp_solver(objective_matrix, equality_constraints, inequality_constraints
     print("Optimizing Z-axis...")
     C_z_opt = _optimize_single_axis(W, A_eq, b_eq_z, D_vel, D_accel, V_max, A_max, degree, MINVO_STENCILS, C_z_init)
     
-    return np.vstack((C_x_opt, C_y_opt, C_z_opt)).T
+    return np.vstack((C_x_opt, C_y_opt, C_z_opt))
 
 
 def _optimize_single_axis(W, A_eq, b_eq, D_vel, D_accel, V_max, A_max, base_degree, minvo_stencils, C_init):
