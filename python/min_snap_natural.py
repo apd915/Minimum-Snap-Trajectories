@@ -19,9 +19,9 @@ trajectory generation.
 import time
 import math
 import numpy as np
-from optimize import run_qp_solver
-from b_spline_constants import M_STENCILS, S_STENCILS, D_STENCILS, T_STENCILS
-from minvo_bounds import MINVO_STENCILS
+from core.optimize import run_qp_solver
+from core.b_spline_constants import M_STENCILS, S_STENCILS, D_STENCILS, T_STENCILS
+from core.minvo_bounds import MINVO_STENCILS
 
 # ==========================================
 # CORE SOLVER CLASS
@@ -320,22 +320,24 @@ if __name__ == "__main__":
     # DEMO: SINGLE FLIGHT PATH GENERATION
     # ----------------------------------------------------
     degree = 7
-    snap_num_segments = 10
+    BASE_SEGMENTS = 10
 
     print("Pre-computing Q Matrix...")
     
     start_time = time.perf_counter()
     
-    min_snap_evaluator = MinSnapEval(snap_num_segments, degree)
+    min_snap_evaluator = MinSnapEval(BASE_SEGMENTS, degree)
     knots = min_snap_evaluator.knots
 
     W = min_snap_evaluator.get_W_matrix()
     Q = min_snap_evaluator.Q
 
-    D_vel = min_snap_evaluator._get_fast_cascaded_D_matrix(snap_num_segments, degree, 1).T
-    D_accel = min_snap_evaluator._get_fast_cascaded_D_matrix(snap_num_segments, degree, 2).T
+    D_vel = min_snap_evaluator._get_fast_cascaded_D_matrix(BASE_SEGMENTS, degree, 1).T
+    D_accel = min_snap_evaluator._get_fast_cascaded_D_matrix(BASE_SEGMENTS, degree, 2).T
 
     for i in range(100):
+        snap_num_segments = BASE_SEGMENTS
+        
         # Generate random start and end conditions
         p0 = np.random.rand(3, 1) * 10 
         v0 = np.random.rand(3, 1) * 5 - 2.5
@@ -363,20 +365,52 @@ if __name__ == "__main__":
         else:
             # 3. Setup the "Glass Box" (The Constrained Answer)
 
-            V_max = 25.0
-            A_max = 10.0
-            
-            # 4. Fire up the QP Solver (e.g., SciPy)
-            # Notice how we pass C_p_min_snap as the initial guess (x0)
+            V_max = 2.7
+            A_max = 1.2
 
-            C_p_min_snap_constrained = run_qp_solver(
-                objective_matrix=W,
-                equality_constraints=SE,
-                inequality_constraints=(D_vel, D_accel, V_max, A_max), 
-                initial_guess=C_p_min_snap,
-                A_eq=min_snap_evaluator.B_combined.T,
-                degree=degree
-            ) 
+            max_segments = 30 
+            success = False
+
+            # 4. Fire up the QP Solver with Optimized Temporal Scaling
+            while snap_num_segments <= max_segments:
+                try:
+                    print(f"Attempting trajectory with {snap_num_segments} segments...")
+                    
+                    # A. Try the solver immediately using the CURRENT matrices
+                    C_p_min_snap_constrained = run_qp_solver(
+                        objective_matrix=W,
+                        equality_constraints=SE,
+                        inequality_constraints=(D_vel, D_accel, V_max, A_max), 
+                        initial_guess=C_p_min_snap,
+                        A_eq=min_snap_evaluator.B_combined.T,
+                        degree=degree
+                    ) 
+                    
+                    # B. If it passes, break out! No need to rebuild anything.
+                    print("Success! Trajectory is physically feasible.")
+                    success = True
+                    break 
+                    
+                except ValueError as e:
+                    print("Physics impossible! Adding time and rebuilding matrices...")
+                    snap_num_segments += 2 
+                    
+                    # C. ONLY rebuild the matrices if we are going to loop again
+                    if snap_num_segments <= max_segments:
+                        min_snap_evaluator.update_segments(snap_num_segments)
+                        
+                        # Pull the newly sized matrices
+                        W = min_snap_evaluator.get_W_matrix()
+                        Q = min_snap_evaluator.Q
+                        D_vel = min_snap_evaluator._get_fast_cascaded_D_matrix(snap_num_segments, degree, 1).T
+                        D_accel = min_snap_evaluator._get_fast_cascaded_D_matrix(snap_num_segments, degree, 2).T
+                        A_eq = min_snap_evaluator.B_combined.T
+                        
+                        # Calculate the new starting guess
+                        C_p_min_snap = SE @ Q
+
+            if not success:
+                print("CRITICAL FAILURE: Could not find a feasible path within the segment limit.")
 
         
     end_time = time.perf_counter()
@@ -388,8 +422,10 @@ if __name__ == "__main__":
     print(f"Average time per trajectory: {avg_time:.6f} seconds ({avg_time * 1000:.3f} ms)")
 
     # Plot the last trajectory from the loop
-    from visualization import plot_trajectory
+    from utils.visualization import plot_trajectory, plot_kinematics
     plot_trajectory(C_p_min_snap_constrained, min_snap_evaluator.knots, degree, minvo_stencils=MINVO_STENCILS)
+    plot_kinematics(C_p_min_snap_constrained, min_snap_evaluator.knots, degree, V_max, A_max) # Verify the physics!
+
 
 
     # ----------------------------------------------------
@@ -397,6 +433,6 @@ if __name__ == "__main__":
     # (Uncomment the lines below to run them)
     # ----------------------------------------------------
     #
-    from benchmarks import run_batch_performance_test, run_performance_benchmark
+    from utils.benchmarks import run_batch_performance_test, run_performance_benchmark
     # run_batch_performance_test()
     # run_performance_benchmark(max_control_points=100)

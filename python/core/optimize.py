@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.optimize import minimize
-from minvo_bounds import MINVO_STENCILS
+from core.minvo_bounds import MINVO_STENCILS
 
 # Added "degree" to the parameters
 def run_qp_solver(objective_matrix, equality_constraints, inequality_constraints, initial_guess, A_eq, degree):

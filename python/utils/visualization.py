@@ -1,7 +1,7 @@
 
 import matplotlib.pyplot as plt
 from scipy.interpolate import BSpline
-from minvo_bounds import MINVO_STENCILS
+from core.minvo_bounds import MINVO_STENCILS
 import numpy as np
 
 # ==========================================
@@ -63,4 +63,59 @@ def plot_trajectory(ctrl_pts, knots, degree, minvo_stencils=None):
     ax.set_title('B-Spline Minimum Snap Trajectory')
     ax.legend()
     ax.set_box_aspect([1, 1, 1]) 
+    plt.show()
+
+
+def plot_kinematics(C_p, knots, degree, V_max, A_max):
+    """
+    Evaluates the continuous velocity and acceleration profiles and plots 
+    them against the physical solver limits.
+    """
+    pts = C_p.T  # Transpose to N x 3 for SciPy
+    
+    # 1. Construct the continuous position spline
+    pos_spline = BSpline(knots, pts, degree)
+    
+    # 2. Extract the analytical derivative splines
+    vel_spline = pos_spline.derivative(nu=1)
+    acc_spline = pos_spline.derivative(nu=2)
+    
+    # 3. Evaluate smoothly over the flight time
+    t_smooth = np.linspace(knots[degree], knots[-degree-1], 500)
+    velocities = vel_spline(t_smooth)
+    accelerations = acc_spline(t_smooth)
+    
+    # 4. Visualization Setup
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    
+    # --- VELOCITY PLOT ---
+    ax1.plot(t_smooth, velocities[:, 0], 'r-', linewidth=2, label='Vx')
+    ax1.plot(t_smooth, velocities[:, 1], 'g-', linewidth=2, label='Vy')
+    ax1.plot(t_smooth, velocities[:, 2], 'b-', linewidth=2, label='Vz')
+    
+    # Draw the physical constraints
+    ax1.axhline(V_max, color='k', linestyle='--', linewidth=2, label=f'Limit (±{V_max} m/s)')
+    ax1.axhline(-V_max, color='k', linestyle='--', linewidth=2)
+    
+    ax1.set_title('Velocity Profiles vs. Physical Limits', fontweight='bold')
+    ax1.set_ylabel('Velocity (m/s)')
+    ax1.legend(loc='upper right')
+    ax1.grid(True, alpha=0.4)
+    
+    # --- ACCELERATION PLOT ---
+    ax2.plot(t_smooth, accelerations[:, 0], 'r-', linewidth=2, label='Ax')
+    ax2.plot(t_smooth, accelerations[:, 1], 'g-', linewidth=2, label='Ay')
+    ax2.plot(t_smooth, accelerations[:, 2], 'b-', linewidth=2, label='Az')
+    
+    # Draw the physical constraints
+    ax2.axhline(A_max, color='k', linestyle='--', linewidth=2, label=f'Limit (±{A_max} m/s²)')
+    ax2.axhline(-A_max, color='k', linestyle='--', linewidth=2)
+    
+    ax2.set_title('Acceleration Profiles vs. Physical Limits', fontweight='bold')
+    ax2.set_xlabel('Time (s)')
+    ax2.set_ylabel('Acceleration (m/s²)')
+    ax2.legend(loc='upper right')
+    ax2.grid(True, alpha=0.4)
+    
+    plt.tight_layout()
     plt.show()
