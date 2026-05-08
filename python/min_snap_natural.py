@@ -292,24 +292,37 @@ class MinSnapEval:
         # print(f"S:\n{S}")
         return S
 
-    def get_W_matrix(self):
+    def get_W_matrix(self, rho_vel=0.0, rho_accel=0.0, rho_snap=1.0):
         """
         Generates the Minimum Snap Penalty matrix (W) for a Natural Uniform Spline.
         Cascades 4 derivative matrices to represent the 4th derivative (Snap).
         """
-        snap_minimization = 4
-
         M = self.M
-        D_cascaded = self._get_fast_cascaded_D_matrix(M, self.degree, snap_minimization)
 
-        k = self.degree-snap_minimization
-        S = self._get_S_matrix(M, k)
-        # print(f'S Matrix:\n{S}')
+        # 1. Calculate Snap W (4th derivative)
+        snap_minimization = 4        
+        D_snap = self._get_fast_cascaded_D_matrix(M, self.degree, snap_minimization)
+        S_snap = self._get_S_matrix(M, self.degree - snap_minimization)
+        W_snap = D_snap @ S_snap @ D_snap.T
+
+        if self.degree <= 4:
+            # 2. Calculate Accel W (2nd derivative)
+            accel_minimization = 2
+            D_accel = self._get_fast_cascaded_D_matrix(M, self.degree, accel_minimization)
+            S_accel = self._get_S_matrix(M, self.degree - accel_minimization)
+            W_accel = D_accel @ S_accel @ D_accel.T
+
+            # 2. Calculate Vel W (1st derivative)
+            vel_minimization = 1
+            D_vel = self._get_fast_cascaded_D_matrix(M, self.degree, vel_minimization)
+            S_vel = self._get_S_matrix(M, self.degree - vel_minimization)
+            W_vel = D_vel @ S_vel @ D_vel.T
+
+            # 3. Blend them together!
+            W_total = (rho_snap * W_snap) + (rho_accel * W_accel) + (rho_vel * W_vel)
+            return W_total
         
-        # W = D_4th @ S @ D_4th.T
-        W = D_cascaded @ S @ D_cascaded.T
-        
-        return W
+        return W_snap
 
 # ==========================================
 # MAIN EXECUTION
@@ -319,8 +332,8 @@ if __name__ == "__main__":
     # ----------------------------------------------------
     # DEMO: SINGLE FLIGHT PATH GENERATION
     # ----------------------------------------------------
-    degree = 7
-    BASE_SEGMENTS = 10
+    degree = 5
+    BASE_SEGMENTS = 15
 
     print("Pre-computing Q Matrix...")
     
@@ -337,13 +350,16 @@ if __name__ == "__main__":
 
     for i in range(100):
         snap_num_segments = BASE_SEGMENTS
-        
+
+        # Define the map dimensions (X, Y, Z)
+        map_size = np.array([[40.0], [40.0], [5.0]])
+
         # Generate random start and end conditions
-        p0 = np.random.rand(3, 1) * 10 
+        p0 = np.random.rand(3, 1) * map_size
         v0 = np.random.rand(3, 1) * 5 - 2.5
         a0 = np.random.rand(3, 1) * 2 - 1
         
-        pf = np.random.rand(3, 1) * 10 
+        pf = np.random.rand(3, 1) * map_size
         vf = np.random.rand(3, 1) * 5 - 2.5
         af = np.random.rand(3, 1) * 2 - 1
         
@@ -365,8 +381,8 @@ if __name__ == "__main__":
         else:
             # 3. Setup the "Glass Box" (The Constrained Answer)
 
-            V_max = 2.7
-            A_max = 1.2
+            V_max = 3
+            A_max = 2
 
             max_segments = 30 
             success = False
