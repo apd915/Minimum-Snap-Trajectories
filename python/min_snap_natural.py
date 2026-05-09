@@ -323,6 +323,45 @@ class MinSnapEval:
             return W_total
         
         return W_snap
+    
+
+    def get_sfc_matrices(self, sfc_constraints, num_pts_list):
+        """
+        Translates Dean's SFC constraints into full-scale QP matrices.
+        """
+        A_ineq_list = []
+        b_ineq_list = []
+        
+        start_idx = 0 
+        
+        for i, sfc in enumerate(sfc_constraints):
+            A_mat = sfc['A'] 
+            b_vec = np.array(sfc['b']).flatten() 
+            
+            num_pts_in_box = num_pts_list[i]
+            num_inequalities = A_mat.shape[0]
+            
+            for j in range(num_pts_in_box):
+                global_cp_index = start_idx + j
+                
+                # Create the padded matrix for this specific control point
+                A_padded = np.zeros((num_inequalities, self.num_control_points * 3))
+                
+                col_start = global_cp_index * 3
+                col_end = col_start + 3
+                A_padded[:, col_start:col_end] = A_mat
+                
+                A_ineq_list.append(A_padded)
+                b_ineq_list.append(b_vec)
+                
+            # Step forward, accounting for the intersection overlap!
+            start_idx += (num_pts_in_box - self.degree)
+            
+        # Stack them vertically to create one massive matrix for the QP solver
+        A_sfc_total = np.vstack(A_ineq_list)
+        b_sfc_total = np.concatenate(b_ineq_list)
+        
+        return A_sfc_total, b_sfc_total
 
 # ==========================================
 # MAIN EXECUTION
