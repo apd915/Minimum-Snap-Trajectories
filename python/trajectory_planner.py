@@ -9,7 +9,7 @@ from min_snap_natural import MinSnapEval
 from core.optimize import run_qp_solver
 
 class TrajectoryPlanner:
-    def __init__(self, map_config, v_max=10.0, a_max=5.0, degree=4):
+    def __init__(self, map_config, v_max=3.0, a_max=2.0, degree=4):
         """
         Initializes the master trajectory planner.
         """
@@ -99,7 +99,7 @@ class TrajectoryPlanner:
                     initial_guess=C_p_guess,
                     A_eq=A_eq,
                     degree=self.degree,
-                    use_minvo=False
+                    use_minvo=True
                 )
 
                 opt_duration = time.perf_counter() - opt_start_time 
@@ -130,7 +130,7 @@ class TrajectoryPlanner:
         print("          TRAJECTORY PLANNER BENCHMARKS")
         print("="*50)
         print(f"SFC Generation (Front-End):   {sfc_duration * 1000:.2f} ms")
-        print(f"QP Optimization (Back-End):   {opt_duration * 1000:.2f} ms")
+        print(f"Path Generation (Back-End):   {opt_duration * 1000:.2f} ms")
         print(f"Matrix & System Overhead:     {overhead_duration * 1000:.2f} ms")
         print("-" * 50)
         print(f"TOTAL PLANNING TIME:          {total_time * 1000:.2f} ms")
