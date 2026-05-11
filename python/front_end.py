@@ -5,6 +5,7 @@ import numpy as np
 from rrt_mavsim.message_types.msg_world_map import MsgWorldMap, FloatingBlocksParams, MapTypes
 from rrt_mavsim.planners.rrt_sfc_bspline import RRT_SFC_BSpline
 from rrt_mavsim.tools.waypointsTools import getNumCntPts_list
+from rrt_mavsim.viewers.plot_map_path import PlotMapPath
 
 # Parameter imports
 import rrt_mavsim.parameters.planner_parameters as PLAN
@@ -26,6 +27,18 @@ class FrontEndSFC:
             numDimensions_algorithm=FLOATING_PARAM.numDimensions,
             floatingBlocksParams=FloatingBlocksParams()
         )
+
+        # plotter_noWaypoints = PlotMapPath(
+        #     map=self.worldMap,
+        #     controlPoints_not_smooth_list=None,
+        # )
+
+        # plotter_noWaypoints.plot(
+        #     x_limits=FLOATING_PARAM.x_limits,
+        #     y_limits=FLOATING_PARAM.y_limits,
+        #     z_limits=FLOATING_PARAM.z_limits,
+        #     aspectRatio=FLOATING_PARAM.aspect_ratio,
+        # )
         
         # 2. Initialize Dean's RRT Planner
         self.path_gen = RRT_SFC_BSpline(

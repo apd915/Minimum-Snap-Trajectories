@@ -26,15 +26,17 @@ class TrajectoryPlanner:
         The main orchestration loop with Dynamic Time Stretching.
         """
         print("--- Starting Trajectory Planning Mission ---")
-        mission_start_time = time.time()
+        mission_start_time = time.perf_counter()
 
         # =========================================================
         # PHASE 1: The Front-End 
         # =========================================================
         print("[Phase 1] Generating Safe Flight Corridors...")
         
+        sfc_start_time = time.perf_counter()
         sfc_constraints, num_pts_list, waypoints_smooth, waypoints_not_smooth = self.front_end.get_corridors(start_pos, end_pos)
-
+        sfc_duration = time.perf_counter() - sfc_start_time
+        
         # Override the point allocation! 
         # 0.003 points per meter * 5000 meters = ~15 control points total
         # custom_point_density = 0.003 
@@ -50,8 +52,8 @@ class TrajectoryPlanner:
             return None, None
 
         # [Visual Check] - Uncomment to pause and view SFCs before solving
-        print("[Visual Check] Displaying SFCs. Close the plot window to begin optimization...")
-        self.visualize(waypoints_smooth, waypoints_not_smooth)
+        # print("[Visual Check] Displaying SFCs. Close the plot window to begin optimization...")
+        # self.visualize(waypoints_smooth, waypoints_not_smooth)
 
         # =========================================================
         # PHASE 2 & 3 & 4: The Optimization and Stretching Loop
@@ -74,6 +76,7 @@ class TrajectoryPlanner:
             A_sfc, b_sfc = self._build_overlap_constraints(sfc_constraints, num_pts_list, total_control_points)
 
             # 2. Initialize Backend Math
+            opt_start_time = time.perf_counter()
             num_segments = total_control_points - self.degree
             optimizer = MinSnapEval(num_segments=num_segments, degree=self.degree)
 
@@ -87,7 +90,7 @@ class TrajectoryPlanner:
             C_p_guess = SE @ Q
 
             # 4. Run the QP Solver
-            print(f"[Phase 3] Running SLSQP Solver...")
+            print(f"[Phase 3] Running OSQP Solver...")
             try:
                 optimal_control_points = run_qp_solver(
                     objective_matrix=W,
@@ -95,9 +98,13 @@ class TrajectoryPlanner:
                     inequality_constraints=(D_vel, D_accel, self.v_max, self.a_max, A_sfc, b_sfc), 
                     initial_guess=C_p_guess,
                     A_eq=A_eq,
-                    degree=self.degree
+                    degree=self.degree,
+                    use_minvo=False
                 )
-                print("[Phase 3] Optimization Successful!")
+
+                opt_duration = time.perf_counter() - opt_start_time 
+                
+                print(f"[Phase 3] Optimization Successful in {opt_duration:.4f}s!")
                 break  # Exit the while loop!
                 
             except Exception as e:
@@ -114,8 +121,20 @@ class TrajectoryPlanner:
                 
                 stretch_count += 1
 
-        total_time = time.time() - mission_start_time
-        print(f"\n--- Mission Complete in {total_time:.3f} seconds ---")
+        total_time = time.perf_counter() - mission_start_time
+
+        # Calculate overhead (matrix formatting, RRT overhead, etc.)
+        overhead_duration = total_time - (sfc_duration + opt_duration)
+
+        print("\n" + "="*50)
+        print("          TRAJECTORY PLANNER BENCHMARKS")
+        print("="*50)
+        print(f"SFC Generation (Front-End):   {sfc_duration * 1000:.2f} ms")
+        print(f"QP Optimization (Back-End):   {opt_duration * 1000:.2f} ms")
+        print(f"Matrix & System Overhead:     {overhead_duration * 1000:.2f} ms")
+        print("-" * 50)
+        print(f"TOTAL PLANNING TIME:          {total_time * 1000:.2f} ms")
+        print("="*50 + "\n")
         
         return optimal_control_points, waypoints_smooth
 
@@ -194,13 +213,37 @@ class TrajectoryPlanner:
 if __name__ == "__main__":
     mock_map = "FLOATING_BLOCKS"
 
-    northEnd = 3000.0
-    eastEnd = 3000.0
-    altitudeEnd = -3000.0
-    downEnd = -altitudeEnd
+    from rrt_mavsim.parameters import floatingBlocks_parameters as FLOATING_PARAM
+    northEnd = FLOATING_PARAM.northEnd
+    eastEnd = FLOATING_PARAM.eastEnd
+    altitudeEnd = -FLOATING_PARAM.altitudeEnd
+    downEnd = -FLOATING_PARAM.downEnd
 
-    start = np.array([[0.0],[0.0],[0.0]])
-    goal = np.array([[northEnd],[eastEnd],[downEnd]])
+    start = FLOATING_PARAM.startPosition_3D
+    goal = FLOATING_PARAM.endPosition_3D
 
     planner = TrajectoryPlanner(map_config=mock_map)
-    optimal_path, SFCs = planner.plan_mission(start, goal)
+    controlPointsList, waypoints_smooth = planner.plan_mission(start, goal)
+
+
+    from rrt_mavsim.message_types.msg_world_map import MsgWorldMap, FloatingBlocksParams, MapTypes
+    worldMap = MsgWorldMap(
+            obstacleFieldType=MapTypes.FLOATING_BLOCKS,
+            numDimensions_algorithm=FLOATING_PARAM.numDimensions,
+            floatingBlocksParams=FloatingBlocksParams()
+        )
+    
+    plotter = PlotMapPath(
+        map=worldMap,
+        waypoints_smooth=waypoints_smooth,
+        controlPoints_not_smooth_list=None,
+        controlPoints_smooth_list=[controlPointsList],
+    )
+
+    plotter.plot(
+        x_limits=FLOATING_PARAM.x_limits,
+        y_limits=FLOATING_PARAM.y_limits,
+        z_limits=FLOATING_PARAM.z_limits,
+        aspectRatio=FLOATING_PARAM.aspect_ratio,
+    )
+    plt.show()
