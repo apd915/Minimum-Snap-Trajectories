@@ -2,6 +2,9 @@ import numpy as np
 import random
 import time
 
+np.random.seed(42)
+random.seed(42)
+
 import matplotlib.pyplot as plt
 from rrt_mavsim.viewers.plot_map_path import PlotMapPath
 import rrt_mavsim.parameters.floatingBlocks_parameters as FLOATING_PARAM
@@ -62,6 +65,7 @@ class TrajectoryPlanner:
         max_stretches = 5
         stretch_count = 0
         optimal_control_points = None
+        opt_duration = 0.0
 
         # Format initial states for the boundary matrices
         S = np.hstack((start_pos.reshape(3,1), start_vel.reshape(3,1), start_acc.reshape(3,1))) 
@@ -224,8 +228,6 @@ if __name__ == "__main__":
     goal = FLOATING_PARAM.endPosition_3D
 
     planner = TrajectoryPlanner(map_config=mock_map)
-    np.random.seed(42)
-    random.seed(42)
     controlPointsList, waypoints_smooth = planner.plan_mission(start, goal)
 
 
