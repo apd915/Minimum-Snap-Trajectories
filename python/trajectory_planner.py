@@ -1,4 +1,5 @@
 import numpy as np
+import random
 import time
 
 import matplotlib.pyplot as plt
@@ -223,6 +224,8 @@ if __name__ == "__main__":
     goal = FLOATING_PARAM.endPosition_3D
 
     planner = TrajectoryPlanner(map_config=mock_map)
+    np.random.seed(42)
+    random.seed(42)
     controlPointsList, waypoints_smooth = planner.plan_mission(start, goal)
 
 
