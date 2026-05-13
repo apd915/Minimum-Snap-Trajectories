@@ -2,4 +2,5 @@ __pycache__/
 build/
 rrt_mavsim/
 eVTOL_BSplines/
+bspline_generator/
 Bad Path.png
