@@ -1,5 +1,6 @@
 import time
 import numpy as np
+import matplotlib.pyplot as plt
 
 # rrt_mavsim imports
 from rrt_mavsim.message_types.msg_world_map import MsgWorldMap, FloatingBlocksParams, MapTypes
@@ -11,6 +12,9 @@ from rrt_mavsim.viewers.plot_map_path import PlotMapPath
 import rrt_mavsim.parameters.planner_parameters as PLAN
 import rrt_mavsim.parameters.floatingBlocks_parameters as FLOATING_PARAM
 import rrt_mavsim.parameters.flightCorridor_parameters as FLIGHT
+
+# Discretization
+from mapping.voxel_grid import SparseVoxelGrid
 
 class FrontEndSFC:
     def __init__(self, map_type="FLOATING_BLOCKS", degree=4):
@@ -39,6 +43,54 @@ class FrontEndSFC:
         #     z_limits=FLOATING_PARAM.z_limits,
         #     aspectRatio=FLOATING_PARAM.aspect_ratio,
         # )
+
+        # 1.5. Transform map into voxel grid
+        # Define your resolution (e.g., 2.5 meters per voxel)
+        self.voxel_resolution = 2.5 
+        
+        # Define your drone's inflation radius (e.g., 2.5m for a 5m wide SFC)
+        self.inflation_radius = 2.5 
+
+        # Initialize your discrete grid (Assuming you build a SparseVoxelGrid class)
+        self.discrete_grid = SparseVoxelGrid(resolution=self.voxel_resolution)
+
+        # Populate the grid using the continuous obstacles
+        continuous_obstacles = self.worldMap.get_obstacles()
+        self.discrete_grid.populate_from_continuous(
+            obstacles=continuous_obstacles, 
+            inflation_radius=self.inflation_radius
+        )
+        # ---------------------------------------------------------
+
+        # 1. Create the base figure (the window)
+        fig = plt.figure()
+
+        # 2. Add a 3D axis to the figure. This generates the 'ax' object!
+        ax = fig.add_subplot(111, projection='3d')
+        occupied = self.discrete_grid.occupied_voxels
+
+        # beginning = time.perf_counter()
+
+        if len(occupied) > 0:
+            x_idx, y_idx, z_idx = zip(*occupied)
+            
+            x_meters = np.array(x_idx) * self.voxel_resolution
+            y_meters = np.array(y_idx) * self.voxel_resolution
+            z_meters = np.array(z_idx) * self.voxel_resolution
+
+        # total = time.perf_counter() - beginning
+        # print(f"Plannning took: {total}\n")
+
+        ax.scatter(x_meters, y_meters, z_meters, color='red', marker='s')
+        # -----------------------
+
+        # Optional: Add some labels so you know which way is which
+        ax.set_xlabel('X (meters)')
+        ax.set_ylabel('Y (meters)')
+        ax.set_zlabel('Z (Altitude)')
+
+        # 4. Render the window! (The code will pause here until you close the plot)
+        plt.show()
         
         # 2. Initialize Dean's RRT Planner
         self.path_gen = RRT_SFC_BSpline(
