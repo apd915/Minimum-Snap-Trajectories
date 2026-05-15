@@ -1,5 +1,7 @@
+import numpy as np
+import matplotlib.pyplot as plt
 import itertools
-from planning.node import Node    
+from .node import Node    
 import heapq
 import math
 
@@ -16,6 +18,10 @@ class AStar_SFC_Planner:
 
     
     def search(self, start_pos, goal_pos):
+        # Force the inputs to be standard Python tuples
+        start_pos = tuple(int(x) for x in np.ravel(start_pos))
+        goal_pos = tuple(int(x) for x in np.ravel(goal_pos))
+
         # 1. Initialize Lists
         open_list = []
         closed_set = set() # O(1) lookups!
@@ -90,42 +96,33 @@ class AStar_SFC_Planner:
 
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
-        res = self.voxel_grid.voxel_resolution
 
         # 1. Plot the Inflated Voxel Grid (C-Space)
-        occupied = self.voxel_grid.occupied_voxels_inflated
-        if len(occupied) > 0:
-            x_idx, y_idx, z_idx = zip(*occupied)
+        # occupied = self.voxel_grid.occupied_voxels_inflated
+        # if len(occupied) > 0:
+        #     x_idx, y_idx, z_idx = zip(*occupied)
             
-            # Convert indices back to physical meters
-            x_meters = np.array(x_idx) * res
-            y_meters = np.array(y_idx) * res
-            z_meters = np.array(z_idx) * res
+        #     # Convert indices back to physical meters
+        #     x_meters = np.array(x_idx) * res
+        #     y_meters = np.array(y_idx) * res
+        #     z_meters = np.array(z_idx) * res
             
-            # alpha=0.15 makes the buildings slightly transparent
-            ax.scatter(x_meters, y_meters, z_meters, color='red', marker='s', s=100, alpha=0.15)
+        #     # alpha=0.15 makes the buildings slightly transparent
+        #     ax.scatter(x_meters, y_meters, z_meters, color='red', marker='s', s=100, alpha=0.15)
 
-        # 2. Plot the A* Path
-        path_x, path_y, path_z = zip(*self.path)
+        from rrt_mavsim.viewers.plot_map_path import PlotMapPath
+        from rrt_mavsim.message_types.msg_world_map import MsgWorldMap, FloatingBlocksParams, MapTypes
+        import rrt_mavsim.parameters.floatingBlocks_parameters as FLOATING_PARAM
         
-        # Convert path indices to physical meters
-        p_x_meters = np.array(path_x) * res
-        p_y_meters = np.array(path_y) * res
-        p_z_meters = np.array(path_z) * res
+        worldMap = MsgWorldMap(
+            obstacleFieldType=MapTypes.FLOATING_BLOCKS,
+            numDimensions_algorithm=FLOATING_PARAM.numDimensions,
+            floatingBlocksParams=FloatingBlocksParams()
+        )
+        plotter = PlotMapPath(map=worldMap,
+                      waypoints_smooth=None)
 
-        # Draw the path as a thick blue line
-        ax.plot(p_x_meters, p_y_meters, p_z_meters, color='blue', linewidth=3, label='A* Path')
-        
-        # Drop solid markers on the exact Start and Goal positions
-        ax.scatter(p_x_meters[0], p_y_meters[0], p_z_meters[0], color='green', s=100, label='Start')
-        ax.scatter(p_x_meters[-1], p_y_meters[-1], p_z_meters[-1], color='purple', s=100, label='Goal')
+        plotter.plot_astar(ax,self.path,self.voxel_grid.voxel_resolution)
 
-        # Formatting
-        ax.set_xlabel('X (meters)')
-        ax.set_ylabel('Y (meters)')
-        ax.set_zlabel('Z (Altitude)')
-        ax.legend()
-        
-        plt.show()
 
 

@@ -70,7 +70,7 @@ class FrontEndSFC:
         # total = time.perf_counter() - beginning
         # print(f"Plannning took: {total}\n")
 
-        self.path_gen_astar = AStar_SFC_Planner(occupied_inflated)
+        self.path_gen_astar = AStar_SFC_Planner(self.discrete_grid)
 
         # 2. Initialize Dean's RRT Planner
         self.path_gen = RRT_SFC_BSpline(
@@ -92,7 +92,7 @@ class FrontEndSFC:
         goal_discretized = tuple((np.array(goal) // self.voxel_resolution).astype(int))
 
         self.path_gen_astar.search(start_discretized, goal_discretized)
-        self.path_gen_astar.visualize()
+        self.path_gen_astar.visualize_path()
 
     def get_corridors(self, start_pos, end_pos, num_points_per_unit=FLIGHT.numPoints_perUnit):
         """
