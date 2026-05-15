@@ -13,8 +13,9 @@ import rrt_mavsim.parameters.planner_parameters as PLAN
 import rrt_mavsim.parameters.floatingBlocks_parameters as FLOATING_PARAM
 import rrt_mavsim.parameters.flightCorridor_parameters as FLIGHT
 
-# Discretization
+# Discretization and A* imports
 from mapping.voxel_grid import SparseVoxelGrid
+from planning.astar_sfc import AStar_SFC_Planner
 
 class FrontEndSFC:
     def __init__(self, map_type="FLOATING_BLOCKS", degree=4):
@@ -32,27 +33,17 @@ class FrontEndSFC:
             floatingBlocksParams=FloatingBlocksParams()
         )
 
-        # plotter_noWaypoints = PlotMapPath(
-        #     map=self.worldMap,
-        #     controlPoints_not_smooth_list=None,
-        # )
-
-        # plotter_noWaypoints.plot(
-        #     x_limits=FLOATING_PARAM.x_limits,
-        #     y_limits=FLOATING_PARAM.y_limits,
-        #     z_limits=FLOATING_PARAM.z_limits,
-        #     aspectRatio=FLOATING_PARAM.aspect_ratio,
-        # )
 
         # 1.5. Transform map into voxel grid
         # Define your resolution (e.g., 2.5 meters per voxel)
-        self.voxel_resolution = 2.5 
+        self.voxel_resolution = 1 
         
         # Define your drone's inflation radius (e.g., 2.5m for a 5m wide SFC)
-        self.inflation_radius = 2.5 
+        self.inflation_radius = FLIGHT.width/2
 
         # Initialize your discrete grid (Assuming you build a SparseVoxelGrid class)
         self.discrete_grid = SparseVoxelGrid(resolution=self.voxel_resolution)
+
 
         # Populate the grid using the continuous obstacles
         continuous_obstacles = self.worldMap.get_obstacles()
@@ -62,36 +53,25 @@ class FrontEndSFC:
         )
         # ---------------------------------------------------------
 
-        # 1. Create the base figure (the window)
-        fig = plt.figure()
-
-        # 2. Add a 3D axis to the figure. This generates the 'ax' object!
-        ax = fig.add_subplot(111, projection='3d')
-        occupied = self.discrete_grid.occupied_voxels
+        occupied_inflated = self.discrete_grid.occupied_voxels_inflated
+        occupied_raw = self.discrete_grid.occupied_voxels_raw
 
         # beginning = time.perf_counter()
 
-        if len(occupied) > 0:
-            x_idx, y_idx, z_idx = zip(*occupied)
+        if len(occupied_inflated) > 0:
+            x_idx, y_idx, z_idx = zip(*occupied_inflated)
             
             x_meters = np.array(x_idx) * self.voxel_resolution
             y_meters = np.array(y_idx) * self.voxel_resolution
             z_meters = np.array(z_idx) * self.voxel_resolution
+            
+            self.visualize(x_meters, y_meters, z_meters, style='')
 
         # total = time.perf_counter() - beginning
         # print(f"Plannning took: {total}\n")
 
-        ax.scatter(x_meters, y_meters, z_meters, color='red', marker='s')
-        # -----------------------
+        self.path_gen_astar = AStar_SFC_Planner(occupied_inflated)
 
-        # Optional: Add some labels so you know which way is which
-        ax.set_xlabel('X (meters)')
-        ax.set_ylabel('Y (meters)')
-        ax.set_zlabel('Z (Altitude)')
-
-        # 4. Render the window! (The code will pause here until you close the plot)
-        plt.show()
-        
         # 2. Initialize Dean's RRT Planner
         self.path_gen = RRT_SFC_BSpline(
             numDimensions=FLOATING_PARAM.numDimensions,
@@ -105,6 +85,14 @@ class FrontEndSFC:
             # This disables Dean's fixed-wing turn radius limitations!
             chiMax=np.inf, 
         )
+
+    def get_corridors_astar(self, start, goal):
+        # Discretize start and end points
+        start_discretized = tuple((np.array(start) // self.voxel_resolution).astype(int))
+        goal_discretized = tuple((np.array(goal) // self.voxel_resolution).astype(int))
+
+        self.path_gen_astar.search(start_discretized, goal_discretized)
+        self.path_gen_astar.visualize()
 
     def get_corridors(self, start_pos, end_pos, num_points_per_unit=FLIGHT.numPoints_perUnit):
         """
@@ -155,3 +143,32 @@ class FrontEndSFC:
             })
             
         return sfc_constraints, num_pts_list, waypoints_smooth, waypoints_not_smooth
+
+
+    def visualize(self, x_meters, y_meters, z_meters, style):
+        if style == 'continuous':
+            plotter_noWaypoints = PlotMapPath(
+            map=self.worldMap,
+            controlPoints_not_smooth_list=None,
+            )
+
+            plotter_noWaypoints.plot(
+                x_limits=FLOATING_PARAM.x_limits,
+                y_limits=FLOATING_PARAM.y_limits,
+                z_limits=FLOATING_PARAM.z_limits,
+                aspectRatio=FLOATING_PARAM.aspect_ratio,
+            )
+        elif style == 'discrete':
+            # 1. Create the base figure (the window)
+            fig = plt.figure()
+            # 2. Add a 3D axis to the figure. This generates the 'ax' object!
+            ax = fig.add_subplot(111, projection='3d')
+            ax.scatter(x_meters, y_meters, z_meters, color='red', marker='s')
+            ax.set_xlabel('X (meters)')
+            ax.set_ylabel('Y (meters)')
+            ax.set_zlabel('Z (Altitude)')
+        else:
+            return
+
+        # 4. Render the window! (The code will pause here until you close the plot)
+        plt.show()
