@@ -7,6 +7,7 @@ from rrt_mavsim.message_types.msg_world_map import MsgWorldMap, FloatingBlocksPa
 from rrt_mavsim.planners.rrt_sfc_bspline import RRT_SFC_BSpline
 from rrt_mavsim.tools.waypointsTools import getNumCntPts_list
 from rrt_mavsim.viewers.plot_map_path import PlotMapPath
+from rrt_mavsim.message_types.msg_waypoints import MsgWaypoints_SFC
 
 # Parameter imports
 import rrt_mavsim.parameters.planner_parameters as PLAN
@@ -70,29 +71,108 @@ class FrontEndSFC:
         # total = time.perf_counter() - beginning
         # print(f"Plannning took: {total}\n")
 
-        self.path_gen_astar = AStar_SFC_Planner(self.discrete_grid)
+        self.bounds = [(0,FLOATING_PARAM.northEnd), (0,FLOATING_PARAM.eastEnd), (0,FLOATING_PARAM.downEnd)]
 
-        # 2. Initialize Dean's RRT Planner
-        self.path_gen = RRT_SFC_BSpline(
-            numDimensions=FLOATING_PARAM.numDimensions,
-            degree=self.degree,
-            M=FLIGHT.M,
-            Va=PLAN.Va0,
-            rho=FLIGHT.rho,
-            step_length=FLIGHT.segmentLength,
-            numDesiredInitPaths=FLIGHT.numInitialPaths,
-            # THE QUADROTOR HACK: We set chiMax to infinity. 
-            # This disables Dean's fixed-wing turn radius limitations!
-            chiMax=np.inf, 
+        self.path_gen_astar = AStar_SFC_Planner(self.discrete_grid, self.bounds)
+
+        # # 2. Initialize Dean's RRT Planner
+        # self.path_gen = RRT_SFC_BSpline(
+        #     numDimensions=FLOATING_PARAM.numDimensions,
+        #     degree=self.degree,
+        #     M=FLIGHT.M,
+        #     Va=PLAN.Va0,
+        #     rho=FLIGHT.rho,
+        #     step_length=FLIGHT.segmentLength,
+        #     numDesiredInitPaths=FLIGHT.numInitialPaths,
+        #     # THE QUADROTOR HACK: We set chiMax to infinity. 
+        #     # This disables Dean's fixed-wing turn radius limitations!
+        #     chiMax=np.inf, 
+        # )
+
+    def get_corridors_astar(self, start_pos, end_pos, num_points_per_unit=FLIGHT.numPoints_perUnit):
+        # 1. Discretize and Search
+        start_discretized = tuple(int(x) for x in np.ravel(start_pos) // self.voxel_resolution)
+        goal_discretized = tuple(int(x) for x in np.ravel(end_pos) // self.voxel_resolution)
+
+        print(f"[Front-End] Starting A* Search from {start_discretized} to {goal_discretized}...")
+        t_start = time.perf_counter()
+        
+        self.path_gen_astar.search(start_discretized, goal_discretized)
+        astar_path_indices = self.path_gen_astar.sfc_smoother()
+        
+        elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+        print(f"[Front-End] A* Search & Smoothing Completed in {elapsed_ms:.2f} ms")
+
+        if not astar_path_indices:
+            print("[Error] A* failed to find a path.")
+            return None, None, None, None
+
+        # 2. Convert discrete grid indices back to continuous 3x1 column vectors
+        continuous_path = []
+        for idx in astar_path_indices:
+            # .reshape(3, 1) is CRITICAL to match your existing matrix math!
+            pos_meters = (np.array(idx) * self.voxel_resolution).reshape(3, 1)
+            continuous_path.append(pos_meters)
+
+        # 3. Build the MsgWaypoints_SFC object
+        waypoints_smooth = MsgWaypoints_SFC(numDimensions=FLOATING_PARAM.numDimensions)
+        
+        # Add the Start point
+        waypoints_smooth.add(
+            position=continuous_path[0], 
+            parent=np.inf, 
+            cost=0.0, 
+            connectsToGoal=False
         )
 
-    def get_corridors_astar(self, start, goal):
-        # Discretize start and end points
-        start_discretized = tuple((np.array(start) // self.voxel_resolution).astype(int))
-        goal_discretized = tuple((np.array(goal) // self.voxel_resolution).astype(int))
+        # 4. Generate the Safe Flight Corridors (SFCs) along the path
+        from rrt_mavsim.message_types.msg_flight_corridors import MsgFlightCorridor
+        
+        for i in range(1, len(continuous_path)):
+            prev_pos = continuous_path[i-1]
+            curr_pos = continuous_path[i]
+            
+            # Add the waypoint
+            is_goal = (i == len(continuous_path) - 1)
+            waypoints_smooth.add(
+                position=curr_pos, 
+                parent=i-1, 
+                cost=0.0, 
+                connectsToGoal=is_goal
+            )
+            
+            # Create the SFC object. (Your system automatically applies the FLIGHT width here!)
+            sfc = MsgFlightCorridor(
+                primaryPosition=prev_pos,
+                secondaryPosition=curr_pos,
+                primaryPosition_index=i-1,
+                numDimensions=FLOATING_PARAM.numDimensions
+            )
+            waypoints_smooth.addSFC(sfc)
+            
+        corridors = waypoints_smooth.getAllFlightCorridors()
+        print(f"[Front-End] Extracted {len(corridors)} Safe Flight Corridors via A*.")
 
-        self.path_gen_astar.search(start_discretized, goal_discretized)
-        self.path_gen_astar.visualize_path()
+        # 5. Calculate Control Point Allocation (Using your existing tools!)
+        from rrt_mavsim.tools.waypointsTools import getNumCntPts_list
+        num_pts_list = getNumCntPts_list(
+            waypoints=waypoints_smooth, 
+            numPointsPerUnit=num_points_per_unit
+        )
+
+        # 6. Extract the A and b constraint matrices for the OSQP solver
+        sfc_constraints = []
+        for sfc in corridors:
+            A_mat, b_vec = sfc.getAbMatrices()
+            sfc_constraints.append({
+                'A': A_mat, 
+                'b': b_vec
+            })
+            
+        # Return the exact same 4-variable tuple that RRT did!
+        # (We return None for waypoints_not_smooth because A* doesn't need to keep the jagged path)
+        return sfc_constraints, num_pts_list, waypoints_smooth, None
+    
 
     def get_corridors(self, start_pos, end_pos, num_points_per_unit=FLIGHT.numPoints_perUnit):
         """

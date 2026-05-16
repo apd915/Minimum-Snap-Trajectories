@@ -25,9 +25,6 @@ class TrajectoryPlanner:
         # Instantiate the Front-End
         self.front_end = FrontEndSFC(map_config, degree)
 
-    def plan_mission_astar(self, start_pos, end_pos, start_vel=np.zeros(3), start_acc=np.zeros(3)):
-        self.front_end.get_corridors_astar(start_pos, end_pos)
-
 
     def plan_mission(self, start_pos, end_pos, start_vel=np.zeros(3), start_acc=np.zeros(3)):
         """
@@ -42,7 +39,7 @@ class TrajectoryPlanner:
         print("[Phase 1] Generating Safe Flight Corridors...")
         
         sfc_start_time = time.perf_counter()
-        sfc_constraints, num_pts_list, waypoints_smooth, waypoints_not_smooth = self.front_end.get_corridors(start_pos, end_pos)
+        sfc_constraints, num_pts_list, waypoints_smooth, waypoints_not_smooth = self.front_end.get_corridors_astar(start_pos, end_pos)
         sfc_duration = time.perf_counter() - sfc_start_time
         
         # Override the point allocation! 
@@ -232,28 +229,27 @@ if __name__ == "__main__":
     goal = FLOATING_PARAM.endPosition_3D
 
     planner = TrajectoryPlanner(map_config=mock_map)
-    path_astar = planner.plan_mission_astar(start, goal)
-    # controlPointsList, waypoints_smooth = planner.plan_mission(start, goal)
+    controlPointsList, waypoints_smooth = planner.plan_mission(start, goal)
 
 
-    # from rrt_mavsim.message_types.msg_world_map import MsgWorldMap, FloatingBlocksParams, MapTypes
-    # worldMap = MsgWorldMap(
-    #         obstacleFieldType=MapTypes.FLOATING_BLOCKS,
-    #         numDimensions_algorithm=FLOATING_PARAM.numDimensions,
-    #         floatingBlocksParams=FloatingBlocksParams()
-    #     )
+    from rrt_mavsim.message_types.msg_world_map import MsgWorldMap, FloatingBlocksParams, MapTypes
+    worldMap = MsgWorldMap(
+            obstacleFieldType=MapTypes.FLOATING_BLOCKS,
+            numDimensions_algorithm=FLOATING_PARAM.numDimensions,
+            floatingBlocksParams=FloatingBlocksParams()
+        )
     
-    # plotter = PlotMapPath(
-    #     map=worldMap,
-    #     waypoints_smooth=waypoints_smooth,
-    #     controlPoints_not_smooth_list=None,
-    #     controlPoints_smooth_list=[controlPointsList],
-    # )
+    plotter = PlotMapPath(
+        map=worldMap,
+        waypoints_smooth=waypoints_smooth,
+        controlPoints_not_smooth_list=None,
+        controlPoints_smooth_list=[controlPointsList],
+    )
 
-    # plotter.plot(
-    #     x_limits=FLOATING_PARAM.x_limits,
-    #     y_limits=FLOATING_PARAM.y_limits,
-    #     z_limits=FLOATING_PARAM.z_limits,
-    #     aspectRatio=FLOATING_PARAM.aspect_ratio,
-    # )
-    # plt.show()
+    plotter.plot(
+        x_limits=FLOATING_PARAM.x_limits,
+        y_limits=FLOATING_PARAM.y_limits,
+        z_limits=FLOATING_PARAM.z_limits,
+        aspectRatio=FLOATING_PARAM.aspect_ratio,
+    )
+    plt.show()

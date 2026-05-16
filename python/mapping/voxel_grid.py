@@ -8,6 +8,8 @@ class SparseVoxelGrid:
         self.occupied_voxels_inflated = set()
         self.occupied_voxels_raw = set()
 
+        # Store the continuous floating-point bounds for the LoS Smoother
+        self.continuous_inflated_bounds = []
     
     def populate_from_continuous(self, obstacles, inflation_radius):
         for obstacle in obstacles:
@@ -17,6 +19,10 @@ class SparseVoxelGrid:
 
             inflated_min = np.array([min_x - inflation_radius, min_y - inflation_radius, min_z - inflation_radius])
             inflated_max = np.array([max_x + inflation_radius, max_y + inflation_radius, max_z + inflation_radius])
+
+            # Save the continuous box before converting to integers
+            self.continuous_inflated_bounds.append((inflated_min, inflated_max))
+
             voxel_coordinates_inflated = ((inflated_min//self.voxel_resolution).astype(int), (inflated_max//self.voxel_resolution).astype(int))
 
             raw_min = np.array([min_x, min_y, min_z])
