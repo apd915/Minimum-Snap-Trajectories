@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # rrt_mavsim imports
-from rrt_mavsim.message_types.msg_world_map import MsgWorldMap, FloatingBlocksParams, MapTypes
+from rrt_mavsim.message_types.msg_world_map import MsgWorldMap, FloatingBlocksParams, CityParams, PlanarMazeParam, MapTypes
 from rrt_mavsim.planners.rrt_sfc_bspline import RRT_SFC_BSpline
 from rrt_mavsim.tools.waypointsTools import getNumCntPts_list
 from rrt_mavsim.viewers.plot_map_path import PlotMapPath
@@ -12,6 +12,8 @@ from rrt_mavsim.message_types.msg_waypoints import MsgWaypoints_SFC
 # Parameter imports
 import rrt_mavsim.parameters.planner_parameters as PLAN
 import rrt_mavsim.parameters.floatingBlocks_parameters as FLOATING_PARAM
+import rrt_mavsim.parameters.city_parameters as CITY_PARAM
+import rrt_mavsim.parameters.planar_maze_parameters as MAZE_PARAM
 import rrt_mavsim.parameters.flightCorridor_parameters as FLIGHT
 
 # Discretization and A* imports
@@ -28,11 +30,23 @@ class FrontEndSFC:
         # 1. Initialize the Map
         # Note: We are defaulting to floating blocks based on your test, 
         # but you can easily swap this logic to accept the CITY map later.
-        self.worldMap = MsgWorldMap(
-            obstacleFieldType=MapTypes.FLOATING_BLOCKS,
-            numDimensions_algorithm=FLOATING_PARAM.numDimensions,
-            floatingBlocksParams=FloatingBlocksParams()
-        )
+        # self.worldMap = MsgWorldMap(
+        #     obstacleFieldType=MapTypes.FLOATING_BLOCKS,
+        #     numDimensions_algorithm=FLOATING_PARAM.numDimensions,
+        #     floatingBlocksParams=FloatingBlocksParams()
+        # )
+
+        # self.worldMap = MsgWorldMap(
+        #     obstacleFieldType=MapTypes.CITY,
+        #     numDimensions_algorithm=CITY_PARAM.numDimensions,
+        #     CityParams=CityParams()
+        # )
+
+        # self.worldMap = MsgWorldMap(
+        #     obstacleFieldType=MapTypes.PLANAR_MAZE,
+        #     numDimensions_algorithm=MAZE_PARAM.numDimensions,
+        #     planarMazeParams=PlanarMazeParam()
+        # )
 
 
         # 1.5. Transform map into voxel grid
