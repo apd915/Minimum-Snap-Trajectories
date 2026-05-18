@@ -1,6 +1,17 @@
 import time
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from scipy.interpolate import BSpline
+import sys
+import os
+
+# Force Python to add the parent 'python/' directory to its search path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
+
 from min_snap_natural import MinSnapEval
 
 # ==========================================
@@ -117,3 +128,277 @@ def run_performance_benchmark(max_control_points=100, iterations=1000, degree=4)
     plt.suptitle('Minimum Snap B-Spline Performance Scaling', fontsize=16)
     plt.tight_layout()
     plt.show()
+
+
+
+def generate_random_city(bounds=(100, 100, 15), num_buildings=30, max_building_size=(15, 15, 15)):
+    """
+    Generates a list of random continuous bounding boxes mimicking a cityscape.
+    Returns a list of dummy obstacle objects that your SparseVoxelGrid can read.
+    """
+    class DummyObstacle:
+        def __init__(self, min_bounds, max_bounds):
+            # Format to match what your voxel_grid.py expects: a 3xN array of vertices
+            self.vertices_shifted_worldFrame_3D = np.array([
+                [min_bounds[0], max_bounds[0]], 
+                [min_bounds[1], max_bounds[1]], 
+                [min_bounds[2], max_bounds[2]]
+            ])
+
+    obstacles = []
+    for _ in range(num_buildings):
+        # Randomly pick the lower-left-bottom corner of the building
+        min_x = np.random.uniform(0, bounds[0] - max_building_size[0])
+        min_y = np.random.uniform(0, bounds[1] - max_building_size[1])
+        min_z = 0 # Buildings start on the ground
+        
+        # Randomly pick the building's size
+        width = np.random.uniform(5, max_building_size[0])
+        depth = np.random.uniform(5, max_building_size[1])
+        height = np.random.uniform(5, max_building_size[2])
+        
+        obstacles.append(DummyObstacle(
+            min_bounds=(min_x, min_y, min_z),
+            max_bounds=(min_x + width, min_y + depth, height)
+        ))
+        
+    return obstacles
+
+
+
+def visualize_random_city(obstacles, control_points, degree, knots):
+    print("\n--- Rendering Last Benchmark Trial ---")
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # 1. Draw the Random Buildings
+    for obs in obstacles:
+        bounds = obs.vertices_shifted_worldFrame_3D
+        min_x, max_x = bounds[0][0], bounds[0][1]
+        min_y, max_y = bounds[1][0], bounds[1][1]
+        min_z, max_z = bounds[2][0], bounds[2][1]
+
+        # Define the 8 vertices of the building
+        vertices = np.array([
+            [min_x, min_y, min_z], [max_x, min_y, min_z], 
+            [max_x, max_y, min_z], [min_x, max_y, min_z],
+            [min_x, min_y, max_z], [max_x, min_y, max_z], 
+            [max_x, max_y, max_z], [min_x, max_y, max_z]
+        ])
+
+        # Define the 6 faces of the building
+        faces = [
+            [vertices[0], vertices[1], vertices[5], vertices[4]], # Front
+            [vertices[1], vertices[2], vertices[6], vertices[5]], # Right
+            [vertices[2], vertices[3], vertices[7], vertices[6]], # Back
+            [vertices[3], vertices[0], vertices[4], vertices[7]], # Left
+            [vertices[4], vertices[5], vertices[6], vertices[7]], # Top
+            [vertices[0], vertices[1], vertices[2], vertices[3]]  # Bottom
+        ]
+        
+        # Add the faces to the plot as semi-transparent blocks
+        poly3d = Poly3DCollection(faces, facecolors='red', linewidths=1, edgecolors='darkred', alpha=0.15)
+        ax.add_collection3d(poly3d)
+
+    # 2. Draw the B-Spline Trajectory
+    if control_points is not None:
+        pts = control_points.T
+        spline = BSpline(knots, pts, degree)
+        t_smooth = np.linspace(knots[degree], knots[-degree-1], 200)
+        curve = spline(t_smooth)
+        
+        # Plot the smooth flight path
+        ax.plot(curve[:, 0], curve[:, 1], curve[:, 2], 'b-', linewidth=3, label='Optimized Flight Path')
+        
+        # Plot the control points
+        ax.plot(pts[:, 0], pts[:, 1], pts[:, 2], 'ko--', alpha=0.3, markersize=4, label='Control Polygon')
+        
+        # Mark Start and End
+        ax.scatter(*pts[0], c='green', s=150, marker='*', label='Start')
+        ax.scatter(*pts[-1], c='purple', s=150, marker='*', label='Goal')
+
+    ax.set_xlabel('X Position (m)')
+    ax.set_ylabel('Y Position (m)')
+    ax.set_zlabel('Z Altitude (m)')
+    ax.set_xlim([0, 100])
+    ax.set_ylim([0, 100])
+    ax.set_zlim([0, 20])
+    ax.legend()
+    
+    plt.title("Randomized Benchmark Environment", fontsize=14, fontweight='bold')
+    plt.show()
+
+
+
+def run_benchmark_suite(num_trials=100):
+    print(f"Starting Benchmark Suite: {num_trials} Randomized Environments...")
+    
+    results = []
+    start_pos = np.array([0.0, 0.0, 0.0])
+    end_pos = np.array([100.0, 100.0, 5.0])
+    
+    for i in range(num_trials):
+        print(f"\n--- Running Trial {i+1}/{num_trials} ---")
+        
+        # 1. Generate the random environment (Using the helper from earlier)
+        random_obstacles = generate_random_city()
+        
+        # 2. Setup your Planner dynamically
+        from trajectory_planner import TrajectoryPlanner
+        planner = TrajectoryPlanner(map_config="RANDOM")
+        
+        # Inject our random map into your existing grid logic
+        planner.front_end.discrete_grid.occupied_voxels_inflated.clear()
+        planner.front_end.discrete_grid.continuous_inflated_bounds.clear()
+        planner.front_end.discrete_grid.populate_from_continuous(
+            obstacles=random_obstacles, 
+            inflation_radius=planner.front_end.inflation_radius
+        )
+
+        trial_data = {
+            "trial_id": i,
+            "success": False,
+            "failure_reason": "None"
+            # We will dynamically add the time metrics here!
+        }
+
+        # 3. Run the ENTIRE pipeline in one shot
+        try:
+            control_points, _, metrics = planner.plan_mission(start_pos, end_pos)
+            
+            # Save the times (A*, OSQP, Overhead, and Total Pipeline Time)
+            trial_data.update(metrics)
+            
+            if control_points is not None:
+                trial_data["success"] = True
+            else:
+                trial_data["failure_reason"] = "OSQP Kinodynamic Failure"
+                
+        except Exception as e:
+            # If A* fails to find a path, your FrontEndSFC currently returns None, None, None, None
+            # which will cause plan_mission to crash when it tries to unpack them. We catch that here!
+            trial_data["failure_reason"] = f"Crash/No Path: {str(e)}"
+             
+        results.append(trial_data)
+        
+    # 4. Export the Data
+    df = pd.DataFrame(results)
+    df.to_csv("trajectory_benchmarks.csv", index=False)
+    
+    print("\n=================================")
+    print("      BENCHMARK COMPLETE         ")
+    print("=================================")
+    print(f"Total Trials: {num_trials}")
+    print(f"Overall Success Rate: {df['success'].mean() * 100:.2f}%")
+    
+    # Only calculate average times for successful flights!
+    success_df = df[df['success'] == True]
+    if not success_df.empty:
+        print(f"Avg A* Time:         {success_df['astar_time_ms'].mean():.2f} ms")
+        print(f"Avg OSQP Time:       {success_df['osqp_time_ms'].mean():.2f} ms")
+        print(f"Avg Total Pipeline:  {success_df['total_pipeline_ms'].mean():.2f} ms")
+
+    if trial_data["success"]:
+        # Grab the knots from the evaluator we just used
+        knots = planner.plan_mission.__globals__['MinSnapEval'](
+            num_segments=len(control_points[0]) - planner.degree, 
+            degree=planner.degree
+        ).knots
+        
+        visualize_random_city(
+            obstacles=random_obstacles, 
+            control_points=control_points, 
+            degree=planner.degree, 
+            knots=knots
+        )
+    
+
+def run_parameter_sweep(num_trials=50):
+    print(f"Starting Parameter Sweep: {num_trials} Randomized Environments...")
+    results = []
+    start_pos = np.array([0.0, 0.0, 0.0])
+    end_pos = np.array([100.0, 100.0, 5.0]) # Keeping the low-altitude constraint!
+    
+    # Define our 3 test profiles
+    test_profiles = [
+        {"profile_name": "5.0m SFC", "sfc_width": 5.0, "voxel_res": 1.0},
+        {"profile_name": "3.0m SFC", "sfc_width": 3.0, "voxel_res": 1.0},
+        {"profile_name": "1.7m SFC", "sfc_width": 1.7, "voxel_res": 0.5}
+    ]
+    
+    for i in range(num_trials):
+        print(f"\n--- Running Trial {i+1}/{num_trials} ---")
+        
+        # 1. Generate ONE random environment for all 3 profiles to solve
+        # (30 buildings to guarantee the "urban canyon" effect)
+        random_obstacles = generate_random_city(num_buildings=30)
+        
+        for profile in test_profiles:
+            print(f"  -> Testing Profile: {profile['profile_name']}")
+            
+            from trajectory_planner import TrajectoryPlanner
+            from mapping.voxel_grid import SparseVoxelGrid
+            from planning.astar_sfc import AStar_SFC_Planner
+            
+            planner = TrajectoryPlanner(map_config="RANDOM")
+            
+            # --- DYNAMIC PARAMETER INJECTION ---
+            planner.front_end.voxel_resolution = profile["voxel_res"]
+            planner.front_end.inflation_radius = profile["sfc_width"] / 2.0
+            
+            # Rebuild the Grid and A* Engine with the new parameters
+            planner.front_end.discrete_grid = SparseVoxelGrid(resolution=profile["voxel_res"])
+            
+            # We must pass the bounds again so A* calculates the new max_indices correctly
+            bounds = [(0.0, 100.0), (0.0, 100.0), (0.0, 15.0)]
+            planner.front_end.path_gen_astar = AStar_SFC_Planner(planner.front_end.discrete_grid, bounds)
+            
+            # Populate the buildings
+            planner.front_end.discrete_grid.populate_from_continuous(
+                obstacles=random_obstacles, 
+                inflation_radius=planner.front_end.inflation_radius
+            )
+
+            trial_data = {
+                "trial_id": i,
+                "profile": profile["profile_name"],
+                "success": False,
+                "failure_reason": "None"
+            }
+
+            # 3. Run the Pipeline
+            try:
+                control_points, _, metrics = planner.plan_mission(start_pos, end_pos)
+                trial_data.update(metrics)
+                
+                if control_points is not None:
+                    trial_data["success"] = True
+                else:
+                    trial_data["failure_reason"] = "OSQP Kinodynamic Failure"
+            except Exception as e:
+                trial_data["failure_reason"] = f"Crash/No Path: {str(e)}"
+                 
+            results.append(trial_data)
+        
+    # Export the Data
+    df = pd.DataFrame(results)
+    df.to_csv("parameter_sweep_results.csv", index=False)
+    
+    # Print a nice summary table
+    print("\n==============================================")
+    print("           PARAMETER SWEEP COMPLETE           ")
+    print("==============================================")
+    for profile in test_profiles:
+        prof_name = profile['profile_name']
+        prof_data = df[df['profile'] == prof_name]
+        success_rate = prof_data['success'].mean() * 100
+        
+        successful_runs = prof_data[prof_data['success'] == True]
+        avg_total = successful_runs['total_pipeline_ms'].mean() if not successful_runs.empty else 0
+        
+        print(f"Profile: {prof_name:<10} | Success: {success_rate:>6.2f}% | Avg Time: {avg_total:>6.2f} ms")
+
+
+if __name__ == "__main__":
+    # run_benchmark_suite(num_trials=100)
+    run_parameter_sweep()

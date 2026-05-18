@@ -30,11 +30,11 @@ class FrontEndSFC:
         # 1. Initialize the Map
         # Note: We are defaulting to floating blocks based on your test, 
         # but you can easily swap this logic to accept the CITY map later.
-        # self.worldMap = MsgWorldMap(
-        #     obstacleFieldType=MapTypes.FLOATING_BLOCKS,
-        #     numDimensions_algorithm=FLOATING_PARAM.numDimensions,
-        #     floatingBlocksParams=FloatingBlocksParams()
-        # )
+        self.worldMap = MsgWorldMap(
+            obstacleFieldType=MapTypes.FLOATING_BLOCKS,
+            numDimensions_algorithm=FLOATING_PARAM.numDimensions,
+            floatingBlocksParams=FloatingBlocksParams()
+        )
 
         # self.worldMap = MsgWorldMap(
         #     obstacleFieldType=MapTypes.CITY,

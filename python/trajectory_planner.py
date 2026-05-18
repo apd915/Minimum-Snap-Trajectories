@@ -141,8 +141,17 @@ class TrajectoryPlanner:
         print("-" * 50)
         print(f"TOTAL PLANNING TIME:          {total_time * 1000:.2f} ms")
         print("="*50 + "\n")
+
+        # --- NEW: Package the metrics for the benchmarking script ---
+        metrics = {
+            "astar_time_ms": sfc_duration * 1000.0,
+            "osqp_time_ms": opt_duration * 1000.0,
+            "overhead_ms": overhead_duration * 1000.0,
+            "total_pipeline_ms": total_time * 1000.0
+        }
         
-        return optimal_control_points, waypoints_smooth
+        return optimal_control_points, waypoints_smooth, metrics
+    
 
     def _build_overlap_constraints(self, sfc_constraints, num_pts_list, total_num_points):
         """
@@ -229,7 +238,7 @@ if __name__ == "__main__":
     goal = FLOATING_PARAM.endPosition_3D
 
     planner = TrajectoryPlanner(map_config=mock_map)
-    controlPointsList, waypoints_smooth = planner.plan_mission(start, goal)
+    controlPointsList, waypoints_smooth, _ = planner.plan_mission(start, goal)
 
 
     from rrt_mavsim.message_types.msg_world_map import MsgWorldMap, FloatingBlocksParams, MapTypes
