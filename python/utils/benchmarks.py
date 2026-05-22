@@ -399,6 +399,159 @@ def run_parameter_sweep(num_trials=50):
         print(f"Profile: {prof_name:<10} | Success: {success_rate:>6.2f}% | Avg Time: {avg_total:>6.2f} ms")
 
 
+def run_batch_performance_test_clamped():
+        # The number of random trajectories we want to compute in each batch
+        batch_sizes = [10, 100, 1000, 5000, 10000, 50000, 100000, 500000, 1000000]
+        
+        execution_times = []
+        
+        # Static physics parameters
+        snap_degree = 4
+        snap_ctrl_pts = 11
+
+        print("\nPre-computing Q Matrix once for all batches...")
+        evaluator = MinSnapEval(snap_ctrl_pts, snap_degree)
+        Q_d4_M = evaluator.get_Q_matrix()
+        
+        print("\nRunning Batch Execution Test...")
+        
+        for num_trajectories in batch_sizes:
+            print(f"Calculating {num_trajectories:,} random trajectories...")
+            
+            # --- START TIMER ---
+            start_exec = time.perf_counter()
+            
+            # Simulate the drone rapidly calculating new paths
+            for _ in range(num_trajectories):
+                # Generate random physical states
+                p0 = np.random.rand(3, 1) * 10 
+                v0 = np.random.rand(3, 1) * 5 - 2.5
+                a0 = np.random.rand(3, 1) * 2 - 1
+                
+                pf = np.random.rand(3, 1) * 10 
+                vf = np.random.rand(3, 1) * 5 - 2.5
+                af = np.random.rand(3, 1) * 2 - 1
+                
+                A_p = np.hstack((p0, v0, a0, af, vf, pf))
+                
+                # The core calculation
+                C_p = A_p @ Q_d4_M
+                
+            # --- STOP TIMER ---
+            end_exec = time.perf_counter()
+            
+            total_time = end_exec - start_exec
+            execution_times.append(total_time)
+
+        # ==========================================
+        # PLOT THE RESULTS
+        # ==========================================
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        ax.plot(batch_sizes, execution_times, 'g-o', linewidth=2, markersize=6)
+        
+        # Format the graph
+        ax.set_title('Batch Processing Time for Clamped Uniform Minimum Snap Trajectories', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Number of Trajectories Computed', fontsize=12)
+        ax.set_ylabel('Total Computation Time (seconds)', fontsize=12)
+        
+        # Use a standard decimal format for the X-axis instead of scientific notation
+        ax.ticklabel_format(style='plain', axis='x')
+        
+        # Add a grid and start axes at 0
+        ax.grid(True, linestyle='--', alpha=0.7)
+        ax.set_xlim(left=0)
+        ax.set_ylim(bottom=0)
+        
+        plt.tight_layout()
+        plt.show()
+
+def run_clamped_performance_benchmark(max_control_points=100, iterations=1000, degree=4):
+    """
+    Benchmarks the setup and execution time of the CLAMPED Minimum Snap solver.
+    """
+    print(f"🚀 Starting Clamped Benchmark: 7 to {max_control_points} Control Points")
+    print(f"   Running {iterations} random trajectories per number of Control Points...\n")
+    
+    # Start at 7 points due to the 6 boundary constraints
+    ctrl_pts_range = range(7, max_control_points + 1, 2)
+    
+    setup_times_ms = []
+    exec_times_us = []
+    
+    for num_pts in ctrl_pts_range:
+        # ==========================================
+        # 1. MEASURE SETUP TIME (SVD & Solver)
+        # ==========================================
+        start_setup = time.perf_counter()
+        
+        # ---> CHANGE THIS TO YOUR ACTUAL CLAMPED CLASS NAME <---
+        evaluator = MinSnapEval(num_pts, degree) 
+        Q_matrix = evaluator.get_Q_matrix()
+        
+        end_setup = time.perf_counter()
+        
+        # Convert to milliseconds
+        setup_times_ms.append((end_setup - start_setup) * 1000)
+        
+        # ==========================================
+        # 2. PRE-GENERATE RANDOM STATES
+        # ==========================================
+
+        start_exec = time.perf_counter()
+        for _ in range(iterations):
+            # p0 = np.random.rand(3, 1) * 10 
+            # v0 = np.random.rand(3, 1) * 5 - 2.5
+            # a0 = np.random.rand(3, 1) * 2 - 1
+            # pf = np.random.rand(3, 1) * 10 
+            # vf = np.random.rand(3, 1) * 5 - 2.5
+            # af = np.random.rand(3, 1) * 2 - 1
+
+            p0 = np.array([[0],[0],[0]])
+            v0 = np.array([[0],[0],[0]])
+            a0 = np.array([[0],[0],[0]])
+            pf = np.array([[10],[10],[10]])
+            vf = np.array([[0],[0],[0]])
+            af = np.array([[0],[0],[0]])
+
+            A_p = np.hstack((p0, v0, a0, af, vf, pf))
+            C_optimal = A_p @ Q_matrix 
+            
+        end_exec = time.perf_counter()
+        
+        # Calculate average time per trajectory in MICROSECONDS
+        total_exec_time = end_exec - start_exec
+        avg_exec_us = (total_exec_time / iterations) * 1_000_000
+        exec_times_us.append(avg_exec_us)
+        
+        print(f"Pts: {num_pts:3d} | Setup: {setup_times_ms[-1]:8.2f} ms | Exec: {avg_exec_us:6.3f} µs")
+
+    # ==========================================
+    # 4. PLOT THE RESULTS
+    # ==========================================
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Plot 1: Setup Time
+    ax1.plot(ctrl_pts_range, setup_times_ms, 'r-o', linewidth=2)
+    ax1.set_title('Clamped Boot-up Time (Q Matrix Generation)', fontsize=12, fontweight='bold')
+    ax1.set_xlabel('Number of Control Points')
+    ax1.set_ylabel('Time (Milliseconds)')
+    ax1.grid(True, linestyle='--', alpha=0.7)
+    
+    # Plot 2: Execution Time
+    ax2.plot(ctrl_pts_range, exec_times_us, 'b-o', linewidth=2)
+    ax2.set_title('Clamped Real-Time Execution (A @ Q)', fontsize=12, fontweight='bold')
+    ax2.set_xlabel('Number of Control Points')
+    ax2.set_ylabel('Time (Microseconds)')
+    ax2.grid(True, linestyle='--', alpha=0.7)
+    
+    ax1.set_ylim(bottom=0)
+    ax2.set_ylim(bottom=0)
+    
+    plt.suptitle('Clamped Minimum Snap Performance Scaling (1000 Iterations/Number of Control Points)', fontsize=16)
+    plt.tight_layout()
+    plt.show()
+
 if __name__ == "__main__":
     # run_benchmark_suite(num_trials=100)
-    run_parameter_sweep()
+    run_parameter_sweep(10000)

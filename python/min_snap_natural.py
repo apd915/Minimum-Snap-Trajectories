@@ -371,7 +371,7 @@ if __name__ == "__main__":
     # ----------------------------------------------------
     # DEMO: SINGLE FLIGHT PATH GENERATION
     # ----------------------------------------------------
-    degree = 5
+    degree = 4
     BASE_SEGMENTS = 15
 
     print("Pre-computing Q Matrix...")
@@ -387,20 +387,27 @@ if __name__ == "__main__":
     D_vel = min_snap_evaluator._get_fast_cascaded_D_matrix(BASE_SEGMENTS, degree, 1).T
     D_accel = min_snap_evaluator._get_fast_cascaded_D_matrix(BASE_SEGMENTS, degree, 2).T
 
-    for i in range(100):
+    for i in range(1):
         snap_num_segments = BASE_SEGMENTS
 
         # Define the map dimensions (X, Y, Z)
         map_size = np.array([[40.0], [40.0], [5.0]])
 
         # Generate random start and end conditions
-        p0 = np.random.rand(3, 1) * map_size
-        v0 = np.random.rand(3, 1) * 5 - 2.5
-        a0 = np.random.rand(3, 1) * 2 - 1
+        # p0 = np.random.rand(3, 1) * map_size
+        # v0 = np.random.rand(3, 1) * 5 - 2.5
+        # a0 = np.random.rand(3, 1) * 2 - 1
         
-        pf = np.random.rand(3, 1) * map_size
-        vf = np.random.rand(3, 1) * 5 - 2.5
-        af = np.random.rand(3, 1) * 2 - 1
+        # pf = np.random.rand(3, 1) * map_size
+        # vf = np.random.rand(3, 1) * 5 - 2.5
+        # af = np.random.rand(3, 1) * 2 - 1
+
+        p0 = np.array([[0],[0],[0]])
+        v0 = np.array([[-10],[-10],[10]])
+        a0 = np.array([[0],[0],[0]])
+        pf = np.array([[10],[10],[10]])
+        vf = np.array([[-10],[-10],[-10]])
+        af = np.array([[0],[0],[0]])
         
         S = np.hstack((p0, v0, a0))
         E = np.hstack((pf, vf, af))
@@ -411,7 +418,7 @@ if __name__ == "__main__":
         # 2. Get the "Starter Motor" path (The Unconstrained Answer)
         # Core optimization calculation
         C_p_min_snap = SE @ Q
-        use_constraints = True
+        use_constraints = False
 
         if not use_constraints:
             # We are done! This is the fastest O(1) path.

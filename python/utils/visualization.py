@@ -21,7 +21,7 @@ def plot_trajectory(ctrl_pts, knots, degree, minvo_stencils=None):
     ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], c='red', s=30)
 
     # 2. Plot the MINVO Polygons (The tight "shrink-wrap")
-    if MINVO_STENCILS is not None and degree in MINVO_STENCILS:
+    if minvo_stencils is not None and degree in MINVO_STENCILS:
         F = minvo_stencils[degree]
         # Calculate how many segments make up this flight path
         num_segments = len(pts) - degree
@@ -118,4 +118,28 @@ def plot_kinematics(C_p, knots, degree, V_max, A_max):
     ax2.grid(True, alpha=0.4)
     
     plt.tight_layout()
+    plt.show()
+
+
+def plot_course_trajectory(ctrl_pts, knots, degree):
+    pts = ctrl_pts.T  # Shape becomes (N, 1)
+    
+    fig, ax = plt.subplots(figsize=(10, 4))
+    
+    # Generate the physical time array for the X-axis of the control points
+    cp_time = np.linspace(knots[0], knots[-1], len(pts))
+    ax.plot(cp_time, pts, 'ro--', alpha=0.5, label='Course Control Polygon')
+    
+    # Evaluate smooth spline
+    spline = BSpline(knots, pts, degree)
+    t_smooth = np.linspace(knots[degree], knots[-degree-1], 100)
+    curve = spline(t_smooth)
+    
+    ax.plot(t_smooth, curve, 'b-', linewidth=3, label='Optimized Course Trajectory')
+    
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Course Angle (Degrees or Rads)')
+    ax.set_title('Minimum 2nd-Derivative Course Spline')
+    ax.legend()
+    ax.grid(True)
     plt.show()
