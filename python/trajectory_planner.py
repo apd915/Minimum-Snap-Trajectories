@@ -14,7 +14,7 @@ from min_snap_clamped import MinSnapEvalClamped
 from core.optimize import run_qp_solver
 
 class TrajectoryPlanner:
-    def __init__(self, map_config, v_max=3.0, a_max=2.0, degree=4):
+    def __init__(self, map_config, v_max=3.0, a_max=2.0, degree=4, spline_type="natural"):
         """
         Initializes the master trajectory planner.
         """
@@ -22,6 +22,7 @@ class TrajectoryPlanner:
         self.v_max = v_max
         self.a_max = a_max
         self.map_config = map_config
+        self.spline_type = spline_type
         
         # Instantiate the Front-End
         self.front_end = FrontEndSFC(map_config, degree)
@@ -69,10 +70,19 @@ class TrajectoryPlanner:
         optimal_control_points = None
         opt_duration = 0.0
 
-        # Format initial states for the boundary matrices
+        # 1. Format initial states for the boundary matrices
         S = np.hstack((start_pos.reshape(3,1), start_vel.reshape(3,1), start_acc.reshape(3,1))) 
-        E = np.hstack((end_pos.reshape(3,1), np.zeros((3,1)), np.zeros((3,1))))
-        SE = np.hstack((S, E))
+
+        # 2. Route the Boundary Logic
+        if self.spline_type == "natural":
+            E_standard = np.hstack((end_pos.reshape(3,1), np.zeros((3,1)), np.zeros((3,1))))
+            SE = np.hstack((S, E_standard))
+        elif self.spline_type == "clamped":
+            E_reversed = np.hstack((np.zeros((3,1)), np.zeros((3,1)), end_pos.reshape(3,1)))
+            SE = np.hstack((S, E_reversed))
+        else:
+            raise ValueError(f"Unknown spline_type: {self.spline_type}")
+        
 
         while stretch_count <= max_stretches:
             print(f"\n--- Optimization Attempt {stretch_count + 1} ---")
@@ -85,12 +95,27 @@ class TrajectoryPlanner:
             # 2. Initialize Backend Math
             opt_start_time = time.perf_counter()
             num_segments = total_control_points - self.degree
-            optimizer = MinSnapEvalNatural(num_segments=num_segments, degree=self.degree)
+            
+            if self.spline_type == "natural":
+                optimizer = MinSnapEvalNatural(num_segments=num_segments, degree=self.degree)
+
+                # Natural natively returns transposed blocks, so we MUST flip them for OSQP
+                D_vel = optimizer._get_fast_cascaded_D_matrix(num_segments, self.degree, 1).T
+                D_accel = optimizer._get_fast_cascaded_D_matrix(num_segments, self.degree, 2).T
+                SE_qp = SE
+            else:
+                optimizer = MinSnapEvalClamped(num_segments=num_segments, degree=self.degree)
+
+                # Clamped natively returns the correct shape. DO NOT flip them!
+                D_vel = optimizer._get_fast_cascaded_D_matrix(num_segments, self.degree, 1)
+                D_accel = optimizer._get_fast_cascaded_D_matrix(num_segments, self.degree, 2)
+                
+                # Clamped requires mapping the boundary targets through B^{d,3}
+                B_d3 = optimizer._get_B_d3_matrix(self.degree)
+                SE_qp = SE @ B_d3
 
             W = optimizer.get_W_matrix()
             Q = optimizer.Q
-            D_vel = optimizer._get_fast_cascaded_D_matrix(num_segments, self.degree, 1).T
-            D_accel = optimizer._get_fast_cascaded_D_matrix(num_segments, self.degree, 2).T
             A_eq = optimizer.B_combined.T
 
             # 3. Initial Guess
@@ -101,12 +126,12 @@ class TrajectoryPlanner:
             try:
                 optimal_control_points = run_qp_solver(
                     objective_matrix=W,
-                    equality_constraints=SE,
+                    equality_constraints=SE_qp,
                     inequality_constraints=(D_vel, D_accel, self.v_max, self.a_max, A_sfc, b_sfc), 
                     initial_guess=C_p_guess,
                     A_eq=A_eq,
                     degree=self.degree,
-                    use_minvo=True
+                    use_minvo=False
                 )
 
                 opt_duration = time.perf_counter() - opt_start_time 
@@ -238,7 +263,7 @@ if __name__ == "__main__":
     start = FLOATING_PARAM.startPosition_3D
     goal = FLOATING_PARAM.endPosition_3D
 
-    planner = TrajectoryPlanner(map_config=mock_map)
+    planner = TrajectoryPlanner(map_config=mock_map, spline_type="clamped")
     controlPointsList, waypoints_smooth, _ = planner.plan_mission(start, goal)
 
 

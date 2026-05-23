@@ -65,31 +65,25 @@ class MinSnapEvalClamped:
         B_d_3 = self._get_B_d3_matrix(self.degree)
         U1, U2 = self._get_U_matrices(self.num_control_points)
 
-        # 1. Grab the O(1) Cascaded D Matrix (e.g., Snap -> j=4)
-        j = 4
-        S_snap = self._get_fast_cascaded_S_matrix(self.M, self.degree, j)
+        # Expose the API properties expected by the trajectory planner
+        self.B_combined = U1 # For OSQP A_eq extraction
 
-        # 2. Grab the O(1) Integral Matrix
-        if self.degree-j == 0:
-            W = S_snap.T @ S_snap
-        else:
-            W_int = self._get_basis_integral_matrix(self.M, self.degree, j)
-            # 3. Combine them to get the final Penalty Matrix!
-            W = S_snap.T @ W_int @ S_snap
+        # 1. Grab the Blended W Matrix
+        W = self.get_W_matrix(rho_snap=1.0)
 
         # S_d4_M, snap_knots = self._get_S_matrix(self.degree, self.degree, self.knots, self.num_control_points)
 
         # # print(f'S_snap=\n{S_snap}\n\nS_d4_M=\n{S_d4_M}\n')
         # W = self._get_W_matrix(S_d4_M, snap_knots)
 
-        # 3. Optimize the Inverse via LU Decomposition Linear Solve
+        # 2. Optimize the Inverse via LU Decomposition Linear Solve
         A_bar = U2.T @ W @ U2
         B_bar = U2.T @ W
         
         X_T = np.linalg.solve(A_bar, B_bar)
         X = X_T.T
 
-        # 4. Final Analytical Q Calculation
+        # 3. Final Analytical Q Calculation
         self.Q = B_d_3 @ U1.T @ (np.eye(self.num_control_points) - X @ U2.T)
 
     def get_Q_matrix(self):
@@ -125,6 +119,32 @@ class MinSnapEvalClamped:
         U2 = I[:, 3:-3]
         return U1, U2
     
+    def get_W_matrix(self, rho_vel=0.0, rho_accel=0.0, rho_snap=1.0):
+        """
+        Generates the Penalty matrix (W) for a Clamped Uniform Spline.
+        Blends the integrated matrices in O(1) time.
+        """
+        M = self.M
+        W_total = np.zeros((self.num_control_points, self.num_control_points))
+
+        if rho_snap > 0:
+            D_snap = self._get_fast_cascaded_D_matrix(M, self.degree, 4)
+            if self.degree - 4 == 0: W_snap = D_snap.T @ D_snap
+            else: W_snap = D_snap.T @ self._get_basis_integral_matrix(M, self.degree, 4) @ D_snap
+            W_total += rho_snap * W_snap
+
+        if rho_accel > 0 and self.degree > 2:
+            D_accel = self._get_fast_cascaded_D_matrix(M, self.degree, 2)
+            W_accel = D_accel.T @ self._get_basis_integral_matrix(M, self.degree, 2) @ D_accel
+            W_total += rho_accel * W_accel
+
+        if rho_vel > 0 and self.degree > 1:
+            D_vel = self._get_fast_cascaded_D_matrix(M, self.degree, 1)
+            W_vel = D_vel.T @ self._get_basis_integral_matrix(M, self.degree, 1) @ D_vel
+            W_total += rho_vel * W_vel
+
+        return W_total
+    
     def _get_basis_integral_matrix(self, M, degree, derivative_order):
         """
         O(1) generation of the integral of b(t)b(t)^T for clamped B-splines.
@@ -158,7 +178,7 @@ class MinSnapEvalClamped:
         
         return W_int
     
-    def _get_fast_cascaded_S_matrix(self, M, degree, derivative_order):
+    def _get_fast_cascaded_D_matrix(self, M, degree, derivative_order):
         """
         O(1) dynamic generation of the cascaded derivative mapping matrix.
         Checks the dictionary first; falls back to symbolic generation if missing.
@@ -301,7 +321,7 @@ if __name__ == "__main__":
     print("Pre-computing Q Matrix...")
     start_time = time.perf_counter()
 
-    min_snap_evaluator = MinSnapEval(BASE_SEGMENTS, snap_degree)
+    min_snap_evaluator = MinSnapEvalClamped(BASE_SEGMENTS, snap_degree)
     Q = min_snap_evaluator.get_Q_matrix()
 
     print("\n--- Running Performance Test: 100 Random Trajectories ---")
