@@ -9,7 +9,8 @@ import matplotlib.pyplot as plt
 from rrt_mavsim.viewers.plot_map_path import PlotMapPath
 import rrt_mavsim.parameters.floatingBlocks_parameters as FLOATING_PARAM
 from front_end import FrontEndSFC
-from min_snap_natural import MinSnapEval
+from min_snap_natural import MinSnapEvalNatural
+from min_snap_clamped import MinSnapEvalClamped
 from core.optimize import run_qp_solver
 
 class TrajectoryPlanner:
@@ -84,7 +85,7 @@ class TrajectoryPlanner:
             # 2. Initialize Backend Math
             opt_start_time = time.perf_counter()
             num_segments = total_control_points - self.degree
-            optimizer = MinSnapEval(num_segments=num_segments, degree=self.degree)
+            optimizer = MinSnapEvalNatural(num_segments=num_segments, degree=self.degree)
 
             W = optimizer.get_W_matrix()
             Q = optimizer.Q

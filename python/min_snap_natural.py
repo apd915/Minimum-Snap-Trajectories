@@ -26,7 +26,7 @@ from core.minvo_bounds import MINVO_STENCILS
 # ==========================================
 # CORE SOLVER CLASS
 # ==========================================
-class MinSnapEval:
+class MinSnapEvalNatural:
     """
     Evaluator for generating Minimum Snap Trajectories using 
     Natural Uniform B-Splines via Singular Value Decomposition (SVD).
@@ -387,7 +387,8 @@ if __name__ == "__main__":
     D_vel = min_snap_evaluator._get_fast_cascaded_D_matrix(BASE_SEGMENTS, degree, 1).T
     D_accel = min_snap_evaluator._get_fast_cascaded_D_matrix(BASE_SEGMENTS, degree, 2).T
 
-    for i in range(1):
+    i_tot = 1
+    for i in range(i_tot):
         snap_num_segments = BASE_SEGMENTS
 
         # Define the map dimensions (X, Y, Z)
@@ -478,15 +479,16 @@ if __name__ == "__main__":
     end_time = time.perf_counter()
 
     total_time = end_time - start_time
-    avg_time = total_time / 100
+    avg_time = total_time / i_tot
     
-    print(f"Total time for 100 trajectories: {total_time:.6f} seconds")
+    print(f"Total time for {i_tot} trajectories: {total_time:.6f} seconds")
     print(f"Average time per trajectory: {avg_time:.6f} seconds ({avg_time * 1000:.3f} ms)")
 
     # Plot the last trajectory from the loop
     from utils.visualization import plot_trajectory, plot_kinematics
-    plot_trajectory(C_p_min_snap_constrained, min_snap_evaluator.knots, degree, minvo_stencils=MINVO_STENCILS)
-    plot_kinematics(C_p_min_snap_constrained, min_snap_evaluator.knots, degree, V_max, A_max) # Verify the physics!
+    plot_trajectory(C_p_min_snap_constrained, min_snap_evaluator.knots, degree)
+    # plot_trajectory(C_p_min_snap_constrained, min_snap_evaluator.knots, degree, minvo_stencils=MINVO_STENCILS)
+    # plot_kinematics(C_p_min_snap_constrained, min_snap_evaluator.knots, degree, V_max, A_max) # Verify the physics!
 
 
 
