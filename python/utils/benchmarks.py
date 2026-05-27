@@ -3,6 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import rrt_mavsim.parameters.plotter_parameters as PLOT
+import rrt_mavsim.parameters.floatingBlocks_parameters as BLOCKS
 from scipy.interpolate import BSpline
 import sys
 import os
@@ -12,7 +14,8 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
-from min_snap_natural import MinSnapEval
+from min_snap_natural import MinSnapEvalNatural
+from min_snap_clamped import MinSnapEvalClamped
 
 # ==========================================
 # BENCHMARKING FUNCTIONS
@@ -29,7 +32,7 @@ def run_batch_performance_test():
     snap_ctrl_pts = 11
 
     print("\nPre-computing Q Matrix once for all batches...")
-    evaluator = MinSnapEval(snap_ctrl_pts, snap_degree)
+    evaluator = MinSnapEvalNatural(snap_ctrl_pts, snap_degree)
     Q_d4_M = evaluator.get_Q_matrix()
     
     print("\nRunning Batch Execution Test...")
@@ -83,7 +86,7 @@ def run_performance_benchmark(max_control_points=100, iterations=1000, degree=4)
     for num_pts in ctrl_pts_range:
         # 1. SETUP PHASE (Boot-up Math)
         start_setup = time.perf_counter()
-        evaluator = MinSnapEval(num_pts, degree)
+        evaluator = MinSnapEvalNatural(num_pts, degree)
         Q_matrix = evaluator.get_Q_matrix()
         end_setup = time.perf_counter()
         
@@ -130,6 +133,49 @@ def run_performance_benchmark(max_control_points=100, iterations=1000, degree=4)
     plt.show()
 
 
+def plot_sfc_wireframes(ax, corridors):
+    """
+    Reconstructs the 8 3D corners of each Safe Flight Corridor and 
+    plots them as a transparent green wireframe.
+    """
+    for corridor in corridors:
+        sfc = corridor.getSFC()
+        # Ensure your dim/trans are in meters, not voxels!
+        dim = sfc.dimensions 
+        trans = sfc.translation 
+        rot = sfc.rotation
+        
+        # 1. Create the 8 corners of a box centered at local origin
+        dx, dy, dz = dim[0,0]/2, dim[1,0]/2, dim[2,0]/2
+        corners_local = np.array([
+            [-dx, -dy, -dz],
+            [ dx, -dy, -dz],
+            [-dx,  dy, -dz],
+            [ dx,  dy, -dz],
+            [-dx, -dy,  dz],
+            [ dx, -dy,  dz],
+            [-dx,  dy,  dz],
+            [ dx,  dy,  dz]
+        ]).T # Shape becomes (3, 8)
+        
+        # 2. Rotate and Translate into the Global Map Space
+        corners_global = rot @ corners_local + trans
+        
+        # 3. Define the 12 edges connecting the 8 corners
+        edges = [
+            (0,1), (0,2), (0,4), (1,3), (1,5), (2,3),
+            (2,6), (3,7), (4,5), (4,6), (5,7), (6,7)
+        ]
+        
+        # 4. Plot the edges as lime green lines
+        for idx1, idx2 in edges:
+            p1 = corners_global[:, idx1]
+            p2 = corners_global[:, idx2]
+            # Use real-world meter coordinates
+            ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]], 
+                    color='lime', alpha=0.8, linewidth=2)
+
+
 
 def generate_random_city(bounds=(100, 100, 15), num_buildings=30, max_building_size=(15, 15, 15)):
     """
@@ -164,9 +210,15 @@ def generate_random_city(bounds=(100, 100, 15), num_buildings=30, max_building_s
         
     return obstacles
 
+#creates the list of points for each side
+sideLists = [[0,1,2,3,0],#-75 3
+             [0,3,7,4,0],#-30 1
+             [0,1,5,4,0],#-75 2
+             [4,5,6,7,4],#75 3
+             [1,2,6,5,1],#730 1
+             [2,3,7,6,2]]#-75 2
 
-
-def visualize_random_city(obstacles, control_points, degree, knots):
+def visualize_random_city(obstacles, control_points, degree, knots, safeFlightCorridors_list):
     print("\n--- Rendering Last Benchmark Trial ---")
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection='3d')
@@ -217,12 +269,60 @@ def visualize_random_city(obstacles, control_points, degree, knots):
         ax.scatter(*pts[0], c='green', s=150, marker='*', label='Start')
         ax.scatter(*pts[-1], c='purple', s=150, marker='*', label='Goal')
 
+    # 3. Draw SFCs
+
+    for safeFlightCorridor in safeFlightCorridors_list:
+        verticesArray = safeFlightCorridor.sfc.getAllVertices_3D()
+        numVertices = np.shape(verticesArray)[1]
+
+        verticesList = [verticesArray[:,i:(i+1)] for i in range(numVertices)]
+
+        #creates all of the sides
+        sideVertexLists = []
+
+        for side in sideLists:
+
+            tempSide = []
+
+            for index in side:
+
+                tempVertex = verticesList[index]
+                tempSide.append(tempVertex)
+
+            sideVerticesArray = np.concatenate((tempSide), axis=1)
+
+            #gets them rotated into the altitude frame
+            sideVerticesArray_rotated = PLOT.R_NED_to_Altitude @ sideVerticesArray
+
+            #plots the side
+            # x_component = sideVerticesArray_rotated[0,:]
+            # y_component = sideVerticesArray_rotated[1,:]
+            # z_component = sideVerticesArray_rotated[2,:]
+
+            x_component = sideVerticesArray[0,:]
+            y_component = sideVerticesArray[1,:]
+            z_component = sideVerticesArray[2,:]
+
+            #plots this side out
+            ax.plot(
+                x_component,
+                y_component,
+                z_component,
+                color="purple",
+                linewidth=2,
+                zorder=1,
+            )
+
+    # Set equal aspect ratio
+    ax.set_box_aspect(BLOCKS.aspect_ratio)
+
     ax.set_xlabel('X Position (m)')
     ax.set_ylabel('Y Position (m)')
     ax.set_zlabel('Z Altitude (m)')
-    ax.set_xlim([0, 100])
-    ax.set_ylim([0, 100])
+    ax.set_xlim(BLOCKS.x_limits)
+    ax.set_ylim(BLOCKS.y_limits)
     ax.set_zlim([0, 20])
+    ax.view_init(elev=0.0,azim=0.0)
     ax.legend()
     
     plt.title("Randomized Benchmark Environment", fontsize=14, fontweight='bold')
@@ -299,8 +399,14 @@ def run_benchmark_suite(num_trials=100):
         print(f"Avg Total Pipeline:  {success_df['total_pipeline_ms'].mean():.2f} ms")
 
     if trial_data["success"]:
-        # Grab the knots from the evaluator we just used
-        knots = planner.plan_mission.__globals__['MinSnapEval'](
+        # Dynamically import the correct evaluator based on the planner's active architecture
+        if planner.spline_type == "natural":
+            from min_snap_natural import MinSnapEvalNatural as SplineEvaluator
+        else:
+            from min_snap_clamped import MinSnapEvalClamped as SplineEvaluator
+
+        # Instantiate the correct class to calculate the knot sequence
+        knots = SplineEvaluator(
             num_segments=len(control_points[0]) - planner.degree, 
             degree=planner.degree
         ).knots
@@ -309,8 +415,11 @@ def run_benchmark_suite(num_trials=100):
             obstacles=random_obstacles, 
             control_points=control_points, 
             degree=planner.degree, 
-            knots=knots
+            knots=knots,
+            safeFlightCorridors_list=planner.front_end.last_corridors
         )
+
+        
     
 
 def run_parameter_sweep(num_trials=50):
@@ -410,7 +519,7 @@ def run_batch_performance_test_clamped():
         snap_ctrl_pts = 11
 
         print("\nPre-computing Q Matrix once for all batches...")
-        evaluator = MinSnapEval(snap_ctrl_pts, snap_degree)
+        evaluator = MinSnapEvalClamped(snap_ctrl_pts, snap_degree)
         Q_d4_M = evaluator.get_Q_matrix()
         
         print("\nRunning Batch Execution Test...")
@@ -486,7 +595,7 @@ def run_clamped_performance_benchmark(max_control_points=100, iterations=1000, d
         start_setup = time.perf_counter()
         
         # ---> CHANGE THIS TO YOUR ACTUAL CLAMPED CLASS NAME <---
-        evaluator = MinSnapEval(num_pts, degree) 
+        evaluator = MinSnapEvalClamped(num_pts, degree) 
         Q_matrix = evaluator.get_Q_matrix()
         
         end_setup = time.perf_counter()
@@ -553,5 +662,5 @@ def run_clamped_performance_benchmark(max_control_points=100, iterations=1000, d
     plt.show()
 
 if __name__ == "__main__":
-    # run_benchmark_suite(num_trials=100)
-    run_parameter_sweep(10000)
+    run_benchmark_suite(num_trials=10)
+    # run_parameter_sweep(100)

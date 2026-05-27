@@ -182,6 +182,9 @@ class FrontEndSFC:
                 'A': A_mat, 
                 'b': b_vec
             })
+
+        # Add this line so the benchmarking script can grab the boxes later!
+        self.last_corridors = corridors
             
         # Return the exact same 4-variable tuple that RRT did!
         # (We return None for waypoints_not_smooth because A* doesn't need to keep the jagged path)

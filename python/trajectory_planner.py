@@ -190,12 +190,30 @@ class TrajectoryPlanner:
         start_idx = 0 
         num_dimensions = 3 
         
+        # ---------------------------------------------------------
+        # NEW: Define the absolute map boundaries (100x100x15)
+        # Hyperplanes: [+x, -x, +y, -y, +z, -z]
+        # ---------------------------------------------------------
+        A_map = np.array([
+            [ 1.0,  0.0,  0.0],
+            [-1.0,  0.0,  0.0],
+            [ 0.0,  1.0,  0.0],
+            [ 0.0, -1.0,  0.0],
+            [ 0.0,  0.0,  1.0],
+            [ 0.0,  0.0, -1.0]
+        ])
+        b_map = np.array([100.0, 0.0, 100.0, 0.0, 15.0, 0.0])
+        
         for i, sfc in enumerate(sfc_constraints):
-            A_mat = sfc['A'] 
-            b_vec = np.array(sfc['b']).flatten() 
+            # ---------------------------------------------------------
+            # NEW: Intersect the SFC with the Map Bounding Box
+            # ---------------------------------------------------------
+            A_mat = np.vstack((sfc['A'], A_map))
+            b_vec = np.concatenate((np.array(sfc['b']).flatten(), b_map))
             
             num_pts_in_box = num_pts_list[i]
-            num_inequalities = A_mat.shape[0]
+            # This automatically adjusts to the new size (original + 6 map walls)
+            num_inequalities = A_mat.shape[0] 
             
             for j in range(num_pts_in_box):
                 global_cp_index = start_idx + j
