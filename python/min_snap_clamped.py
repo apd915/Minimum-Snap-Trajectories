@@ -22,6 +22,8 @@ Will need to define matrices and how to calculate them
 import numpy as np
 from numpy.linalg import inv
 from core.clamped_constants import CASCADED_S_STENCILS, INTEGRAL_STENCILS
+from core.minvo_bounds_clamped import MINVO_CLAMPED_STENCILS
+from core.minvo_bounds import MINVO_STENCILS
 from fractions import Fraction
 import time
 
@@ -332,20 +334,20 @@ if __name__ == "__main__":
     for i in range(i_tot):
         # Generate random 3x1 column vectors for the states
         # The scalars give them reasonable physical ranges (e.g., 0 to 10 meters for position)
-        # p0 = np.random.rand(3, 1) * 10 
-        # v0 = np.random.rand(3, 1) * 5 - 2.5
-        # a0 = np.random.rand(3, 1) * 2 - 1
+        p0 = np.random.rand(3, 1) * 10 
+        v0 = np.random.rand(3, 1) * 5 - 2.5
+        a0 = np.random.rand(3, 1) * 2 - 1
         
-        # pf = np.random.rand(3, 1) * 10 
-        # vf = np.random.rand(3, 1) * 5 - 2.5
-        # af = np.random.rand(3, 1) * 2 - 1
+        pf = np.random.rand(3, 1) * 10 
+        vf = np.random.rand(3, 1) * 5 - 2.5
+        af = np.random.rand(3, 1) * 2 - 1
 
-        p0 = np.array([[0],[0],[0]])
-        v0 = np.array([[-10],[-10],[10]])
-        a0 = np.array([[0],[0],[0]])
-        pf = np.array([[10],[10],[10]])
-        vf = np.array([[-10],[-10],[-10]])
-        af = np.array([[0],[0],[0]])
+        # p0 = np.array([[0],[0],[0]])
+        # v0 = np.array([[-10],[-10],[10]])
+        # a0 = np.array([[0],[0],[0]])
+        # pf = np.array([[10],[10],[10]])
+        # vf = np.array([[-10],[-10],[-10]])
+        # af = np.array([[0],[0],[0]])
         
         # Build the boundary constraint matrix
         A_p = np.hstack((p0, v0, a0, af, vf, pf))
@@ -367,7 +369,7 @@ if __name__ == "__main__":
     # print("\n--- 3D Minimum Snap Control Points ---")
     # print(C_p_snap)
     from utils.visualization import plot_trajectory, plot_course_trajectory
-    plot_trajectory(C_p_snap, min_snap_evaluator.knots, snap_degree)
+    plot_trajectory(C_p_snap, min_snap_evaluator.knots, snap_degree, minvo_stencils=MINVO_CLAMPED_STENCILS)
 
 
     # from utils.benchmarks import run_batch_performance_test_clamped, run_clamped_performance_benchmark

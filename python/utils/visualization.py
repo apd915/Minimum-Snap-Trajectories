@@ -1,13 +1,14 @@
 
 import matplotlib.pyplot as plt
 from scipy.interpolate import BSpline
+from core.minvo_bounds_clamped import MINVO_CLAMPED_STENCILS
 from core.minvo_bounds import MINVO_STENCILS
 import numpy as np
 
 # ==========================================
 # UTILITY & VISUALIZATION
 # ==========================================
-def plot_trajectory(ctrl_pts, knots, degree, minvo_stencils=None):
+def plot_trajectory(ctrl_pts, knots, degree, spline_type="clamped", minvo_stencils=None):
     """
     Evaluates and plots the 3D Minimum Snap Trajectory and its control polygon.
     """
@@ -21,17 +22,29 @@ def plot_trajectory(ctrl_pts, knots, degree, minvo_stencils=None):
     ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], c='red', s=30)
 
     # 2. Plot the MINVO Polygons (The tight "shrink-wrap")
-    if minvo_stencils is not None and degree in MINVO_STENCILS:
-        F = minvo_stencils[degree]
+    if minvo_stencils is not None:
+        
         # Calculate how many segments make up this flight path
         num_segments = len(pts) - degree
-        
         # Define a list of colors to cycle through
         colors = ['g', 'c', 'm', 'y', 'orange'] 
         
         # Slide the window across each segment!
         for s in range(num_segments):
             C_local = pts[s : s + degree + 1]
+
+            if spline_type == "clamped":
+                stencils = MINVO_CLAMPED_STENCILS[degree]
+                if s < degree:
+                    F = stencils[f'start_{s}']
+                elif s >= num_segments - degree:
+                    end_idx = num_segments - 1 - s
+                    F = stencils[f'end_{end_idx}']
+                else:
+                    F = stencils['interior']
+            else:
+                F = minvo_stencils[degree]
+
             V_local = F @ C_local
             V_closed = np.vstack((V_local, V_local[0]))
             
