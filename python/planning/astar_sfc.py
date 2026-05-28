@@ -175,6 +175,52 @@ class AStar_SFC_Planner:
                 return False # Collision detected!
                 
         return True # Line of sight is completely clear
+    
+    def get_safe_extension_length(self, idx_a, idx_b, requested_extension):
+        """
+        Fires a ray forward from idx_b to dynamically cap the extension 
+        so it never penetrates an inflated obstacle.
+        """
+        if requested_extension <= 0.0:
+            return 0.0
+            
+        res = self.voxel_grid.voxel_resolution
+        p0 = np.array(idx_a) * res
+        p1 = np.array(idx_b) * res
+        
+        # 1. Get the direction vector
+        d = p1 - p0
+        dist = np.linalg.norm(d)
+        if dist == 0:
+            return 0.0
+            
+        # Unit vector of our approach
+        dir_unit = d / dist 
+        
+        with np.errstate(divide='ignore'):
+            inv_d = 1.0 / dir_unit
+            
+        min_safe_distance = requested_extension
+        
+        # 2. Fast Vectorized Slab Check
+        for b_min, b_max in self.voxel_grid.continuous_inflated_bounds:
+            t1 = (b_min - p1) * inv_d
+            t2 = (b_max - p1) * inv_d
+            
+            t_min = np.minimum(t1, t2)
+            t_max = np.maximum(t1, t2)
+            
+            t_enter = np.max(t_min)
+            t_exit = np.min(t_max)
+            
+            # If the ray intersects the box in front of us...
+            if t_enter <= t_exit and t_exit >= 0:
+                # And the box is closer than our requested extension...
+                if t_enter > 0 and t_enter < min_safe_distance:
+                    # Cap the extension! (Subtract 0.01m epsilon so we don't scrape the wall)
+                    min_safe_distance = max(0.0, t_enter - 0.01)
+                    
+        return min_safe_distance
 
     def visualize_path(self):
         """
@@ -189,17 +235,17 @@ class AStar_SFC_Planner:
         ax = fig.add_subplot(111, projection='3d')
 
         # 1. Plot the Inflated Voxel Grid (C-Space)
-        # occupied = self.voxel_grid.occupied_voxels_inflated
-        # if len(occupied) > 0:
-        #     x_idx, y_idx, z_idx = zip(*occupied)
+        occupied = self.voxel_grid.occupied_voxels_inflated
+        if len(occupied) > 0:
+            x_idx, y_idx, z_idx = zip(*occupied)
             
-        #     # Convert indices back to physical meters
-        #     x_meters = np.array(x_idx) * res
-        #     y_meters = np.array(y_idx) * res
-        #     z_meters = np.array(z_idx) * res
+            # Convert indices back to physical meters
+            x_meters = np.array(x_idx) * self.voxel_grid.voxel_resolution
+            y_meters = np.array(y_idx) * self.voxel_grid.voxel_resolution
+            z_meters = np.array(z_idx) * self.voxel_grid.voxel_resolution
             
-        #     # alpha=0.15 makes the buildings slightly transparent
-        #     ax.scatter(x_meters, y_meters, z_meters, color='red', marker='s', s=100, alpha=0.15)
+            # alpha=0.15 makes the buildings slightly transparent
+            ax.scatter(x_meters, y_meters, z_meters, color='red', marker='s', s=100, alpha=0.15)
 
         from rrt_mavsim.viewers.plot_map_path import PlotMapPath
         from rrt_mavsim.message_types.msg_world_map import MsgWorldMap, FloatingBlocksParams, MapTypes

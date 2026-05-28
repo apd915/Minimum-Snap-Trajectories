@@ -142,6 +142,9 @@ class FrontEndSFC:
         # 4. Generate the Safe Flight Corridors (SFCs) along the path
         from rrt_mavsim.message_types.msg_flight_corridors import MsgFlightCorridor
         
+        desired_end_ext = 5. # The max overlapping wedge we want
+        desired_start_ext = 5.
+
         for i in range(1, len(continuous_path)):
             prev_pos = continuous_path[i-1]
             curr_pos = continuous_path[i]
@@ -154,24 +157,50 @@ class FrontEndSFC:
                 cost=0.0, 
                 connectsToGoal=is_goal
             )
+
+            # -------------------------------------------------------------
+            # NEW: Dynamic Capping!
+            # We must convert the 3x1 continuous meter vectors back to 
+            # discrete voxel indices for the raycast check to work.
+            # -------------------------------------------------------------
+            idx_a = tuple(int(x) for x in np.ravel(prev_pos) // self.voxel_resolution)
+            idx_b = tuple(int(x) for x in np.ravel(curr_pos) // self.voxel_resolution)
             
-            # Create the SFC object. (Your system automatically applies the FLIGHT width here!)
+            # 1. Fire ray FORWARD to cap the end extension
+            safe_end_ext = self.path_gen_astar.get_safe_extension_length(idx_a, idx_b, desired_end_ext)
+            
+            # 2. Fire ray BACKWARD to cap the start extension (Notice the flipped indices!)
+            safe_start_ext = self.path_gen_astar.get_safe_extension_length(idx_b, idx_a, desired_start_ext)
+            
+            # Create the SFC object using the mathematically proven safe bounds!
             sfc = MsgFlightCorridor(
                 primaryPosition=prev_pos,
                 secondaryPosition=curr_pos,
                 primaryPosition_index=i-1,
-                numDimensions=FLOATING_PARAM.numDimensions
+                numDimensions=FLOATING_PARAM.numDimensions,
+                startExtension_length=safe_start_ext, 
+                endExtension_length=safe_end_ext
             )
+            
             waypoints_smooth.addSFC(sfc)
             
         corridors = waypoints_smooth.getAllFlightCorridors()
         print(f"[Front-End] Extracted {len(corridors)} Safe Flight Corridors via A*.")
 
-        # 5. Calculate Control Point Allocation (Using your existing tools!)
-        from rrt_mavsim.tools.waypointsTools import getNumCntPts_list
-        num_pts_list = getNumCntPts_list(
-            waypoints=waypoints_smooth, 
-            numPointsPerUnit=num_points_per_unit
+        # # 5. Calculate Control Point Allocation (Using your existing tools!)
+        # from rrt_mavsim.tools.waypointsTools import getNumCntPts_list
+        # num_pts_list = getNumCntPts_list(
+        #     waypoints=waypoints_smooth, 
+        #     numPointsPerUnit=num_points_per_unit
+        # )
+
+        # 5. Calculate Control Point Allocation (Dynamic Kinematic & Local Support)
+        num_pts_list = self.allocate_dynamic_control_points(
+            corridors=corridors,
+            degree=self.degree,
+            v_max=3.0,       # Max drone speed
+            a_max=2.0,       # Max drone acceleration
+            pts_per_sec=1.0  # Desired temporal density 
         )
 
         # 6. Extract the A and b constraint matrices for the OSQP solver
@@ -240,6 +269,76 @@ class FrontEndSFC:
             })
             
         return sfc_constraints, num_pts_list, waypoints_smooth, waypoints_not_smooth
+    
+
+    def allocate_dynamic_control_points(self, corridors, degree, v_max=3.0, a_max=2.0, pts_per_sec=1.0):
+        """
+        Apex-Centric Dynamic Allocation Manager.
+        Treats intersections as independent geometric entities.
+        """
+        num_corridors = len(corridors)
+        num_pts_list = [0] * num_corridors
+        
+        # ==========================================
+        # PASS 1: The Straightaway Baseline
+        # ==========================================
+        for i in range(num_corridors):
+            L = getattr(corridors[i], 'length', 1.0)
+            
+            # Pure straight-line kinematics
+            t_cruise = L / v_max
+            t_accel = 2.0 * np.sqrt(L / a_max)
+            t_target = max(t_cruise, t_accel)
+            
+            # Assign baseline points
+            N_kinematic = int(np.ceil(t_target * pts_per_sec))
+            
+            # Enforce the mathematical Local Support Floor
+            num_pts_list[i] = max(N_kinematic, 2 * degree)
+
+        # ==========================================
+        # PASS 2: The Apex Injector (The 3rd Entity)
+        # ==========================================
+        # We loop through the joints BETWEEN the corridors
+        for i in range(num_corridors - 1):
+            sfc_in = corridors[i]
+            sfc_out = corridors[i+1]
+            
+            # Grab the 3 intersection waypoints
+            p0 = np.ravel(sfc_in.primaryPosition)
+            p1 = np.ravel(sfc_in.secondaryPosition) # The Apex
+            p2 = np.ravel(sfc_out.secondaryPosition)
+            
+            v_in = p1 - p0
+            v_out = p2 - p1
+            
+            norm_in = np.linalg.norm(v_in)
+            norm_out = np.linalg.norm(v_out)
+            
+            if norm_in > 0.001 and norm_out > 0.001:
+                # Calculate the turn angle
+                cos_theta = np.dot(v_in, v_out) / (norm_in * norm_out)
+                cos_theta = np.clip(cos_theta, -1.0, 1.0)
+                
+                # The momentum shedding factor (0 for straight, 1.0 for 90-deg)
+                momentum_shed_factor = 1.0 - cos_theta
+                
+                # If it's a real turn (e.g., more than a ~25 degree bend)
+                if momentum_shed_factor > 0.1: 
+                    # 1. Create the Apex Pool
+                    # A 90-deg turn creates a pool of exactly 12 extra control points
+                    apex_pool_size = int(np.ceil(momentum_shed_factor * 12.0))
+                    
+                    # 2. Split the pool in half
+                    half_pool = apex_pool_size // 2
+                    
+                    # 3. Inject the shared load!
+                    # SFC A gets extra points at its tail to brake
+                    num_pts_list[i] += half_pool
+                    # SFC B gets extra points at its nose to accelerate out
+                    num_pts_list[i+1] += half_pool
+
+        return num_pts_list
 
 
     def visualize(self, x_meters, y_meters, z_meters, style):
