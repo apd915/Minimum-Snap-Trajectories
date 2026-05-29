@@ -21,11 +21,16 @@ from mapping.voxel_grid import SparseVoxelGrid
 from planning.astar_sfc import AStar_SFC_Planner
 
 class FrontEndSFC:
-    def __init__(self, map_type="FLOATING_BLOCKS", degree=4):
+    def __init__(self, sfc_height, sfc_width, sfc_start_ext, sfc_end_ext, spline_type="natural", map_type="FLOATING_BLOCKS", degree=4):
         """
         Initializes the environment and the RRT planner.
         """
         self.degree = degree
+        self.sfc_height = sfc_height
+        self.sfc_width = sfc_width
+        self.sfc_start_ext = sfc_start_ext
+        self.sfc_end_ext = sfc_end_ext
+        self.spline_type = spline_type
         
         # 1. Initialize the Map
         # Note: We are defaulting to floating blocks based on your test, 
@@ -54,7 +59,7 @@ class FrontEndSFC:
         self.voxel_resolution = 1 
         
         # Define your drone's inflation radius (e.g., 2.5m for a 5m wide SFC)
-        self.inflation_radius = FLIGHT.width/2
+        self.inflation_radius = self.sfc_width/2
 
         # Initialize your discrete grid (Assuming you build a SparseVoxelGrid class)
         self.discrete_grid = SparseVoxelGrid(resolution=self.voxel_resolution)
@@ -103,7 +108,7 @@ class FrontEndSFC:
         #     chiMax=np.inf, 
         # )
 
-    def get_corridors_astar(self, start_pos, end_pos, num_points_per_unit=FLIGHT.numPoints_perUnit):
+    def get_corridors_astar(self, start_pos, end_pos):
         # 1. Discretize and Search
         start_discretized = tuple(int(x) for x in np.ravel(start_pos) // self.voxel_resolution)
         goal_discretized = tuple(int(x) for x in np.ravel(end_pos) // self.voxel_resolution)
@@ -141,9 +146,6 @@ class FrontEndSFC:
 
         # 4. Generate the Safe Flight Corridors (SFCs) along the path
         from rrt_mavsim.message_types.msg_flight_corridors import MsgFlightCorridor
-        
-        desired_end_ext = 5. # The max overlapping wedge we want
-        desired_start_ext = 5.
 
         for i in range(1, len(continuous_path)):
             prev_pos = continuous_path[i-1]
@@ -167,20 +169,47 @@ class FrontEndSFC:
             idx_b = tuple(int(x) for x in np.ravel(curr_pos) // self.voxel_resolution)
             
             # 1. Fire ray FORWARD to cap the end extension
-            safe_end_ext = self.path_gen_astar.get_safe_extension_length(idx_a, idx_b, desired_end_ext)
+            safe_end_ext = self.path_gen_astar.get_safe_extension_length(idx_a, idx_b, self.sfc_end_ext)
             
             # 2. Fire ray BACKWARD to cap the start extension (Notice the flipped indices!)
-            safe_start_ext = self.path_gen_astar.get_safe_extension_length(idx_b, idx_a, desired_start_ext)
-            
-            # Create the SFC object using the mathematically proven safe bounds!
-            sfc = MsgFlightCorridor(
+            safe_start_ext = self.path_gen_astar.get_safe_extension_length(idx_b, idx_a, self.sfc_start_ext)
+
+            if self.spline_type == 'natural' and (i-1) == 0:
+                sfc = MsgFlightCorridor(
                 primaryPosition=prev_pos,
                 secondaryPosition=curr_pos,
                 primaryPosition_index=i-1,
                 numDimensions=FLOATING_PARAM.numDimensions,
-                startExtension_length=safe_start_ext, 
+                height=self.sfc_height,
+                width=self.sfc_width,
+                startExtension_length=30., 
                 endExtension_length=safe_end_ext
             )
+                
+            elif self.spline_type == 'natural' and i == len(continuous_path) - 1:
+                sfc = MsgFlightCorridor(
+                primaryPosition=prev_pos,
+                secondaryPosition=curr_pos,
+                primaryPosition_index=i-1,
+                numDimensions=FLOATING_PARAM.numDimensions,
+                height=self.sfc_height,
+                width=self.sfc_width,
+                startExtension_length=safe_start_ext, 
+                endExtension_length=30.
+            )
+                
+            else:
+                # Create the SFC object using the mathematically proven safe bounds!
+                sfc = MsgFlightCorridor(
+                    primaryPosition=prev_pos,
+                    secondaryPosition=curr_pos,
+                    primaryPosition_index=i-1,
+                    numDimensions=FLOATING_PARAM.numDimensions,
+                    height=self.sfc_height,
+                    width=self.sfc_width,
+                    startExtension_length=safe_start_ext, 
+                    endExtension_length=safe_end_ext
+                )
             
             waypoints_smooth.addSFC(sfc)
             
@@ -326,8 +355,8 @@ class FrontEndSFC:
                 # If it's a real turn (e.g., more than a ~25 degree bend)
                 if momentum_shed_factor > 0.1: 
                     # 1. Create the Apex Pool
-                    # A 90-deg turn creates a pool of exactly 12 extra control points
-                    apex_pool_size = int(np.ceil(momentum_shed_factor * 12.0))
+                    # A 90-deg turn creates a pool of exactly deg*3 (start of turn,curve,end of turn) extra control points
+                    apex_pool_size = int(np.ceil(momentum_shed_factor * (self.degree*3)))
                     
                     # 2. Split the pool in half
                     half_pool = apex_pool_size // 2

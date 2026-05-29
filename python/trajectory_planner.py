@@ -14,7 +14,7 @@ from min_snap_clamped import MinSnapEvalClamped
 from core.optimize import run_qp_solver
 
 class TrajectoryPlanner:
-    def __init__(self, map_config, v_max=3.0, a_max=2.0, degree=4, spline_type="natural"):
+    def __init__(self, map_config, map_bounds=(100.,100.,15.), v_max=3.0, a_max=2.0, degree=4, spline_type="natural", sfc_height=1., sfc_width=1., sfc_start_ext=5., sfc_end_ext=5.):
         """
         Initializes the master trajectory planner.
         """
@@ -23,9 +23,14 @@ class TrajectoryPlanner:
         self.a_max = a_max
         self.map_config = map_config
         self.spline_type = spline_type
+        self.sfc_height = sfc_height
+        self.sfc_width = sfc_width
+        self.sfc_start_ext = sfc_start_ext
+        self.sfc_end_ext = sfc_end_ext
+        self.map_bounds=map_bounds
         
         # Instantiate the Front-End
-        self.front_end = FrontEndSFC(map_config, degree)
+        self.front_end = FrontEndSFC(self.sfc_height, self.sfc_width, self.sfc_start_ext, self.sfc_end_ext, self.spline_type, map_config, degree)
 
 
     def plan_mission(self, start_pos, end_pos, start_vel=np.zeros(3), start_acc=np.zeros(3)):
@@ -115,11 +120,7 @@ class TrajectoryPlanner:
                 SE_qp = SE @ B_d3
 
             W = optimizer.get_W_matrix()
-            Q = optimizer.Q
             A_eq = optimizer.B_combined.T
-
-            # 3. Initial Guess
-            C_p_guess = SE @ Q
 
             # 4. Run the QP Solver
             print(f"[Phase 3] Running OSQP Solver...")
@@ -128,7 +129,6 @@ class TrajectoryPlanner:
                     objective_matrix=W,
                     equality_constraints=SE_qp,
                     inequality_constraints=(D_vel, D_accel, self.v_max, self.a_max, A_sfc, b_sfc), 
-                    initial_guess=C_p_guess,
                     A_eq=A_eq,
                     degree=self.degree,
                     spline_type=self.spline_type,
@@ -191,19 +191,22 @@ class TrajectoryPlanner:
         start_idx = 0 
         num_dimensions = 3 
         
+        # 1. Unpack the dynamic class variable
+        north_end, east_end, alt_end = self.map_bounds
+
         # ---------------------------------------------------------
         # NEW: Define the absolute map boundaries (100x100x15)
         # Hyperplanes: [+x, -x, +y, -y, +z, -z]
         # ---------------------------------------------------------
         A_map = np.array([
-            [ 1.0,  0.0,  0.0],
-            [-1.0,  0.0,  0.0],
-            [ 0.0,  1.0,  0.0],
-            [ 0.0, -1.0,  0.0],
-            [ 0.0,  0.0,  1.0],
-            [ 0.0,  0.0, -1.0]
+            [ 1.0,  0.0,  0.0], # +x (North)
+            [-1.0,  0.0,  0.0], # -x (South)
+            [ 0.0,  1.0,  0.0], # +y (East)
+            [ 0.0, -1.0,  0.0], # -y (West)
+            [ 0.0,  0.0,  1.0], # +z (Up/Alt)
+            [ 0.0,  0.0, -1.0]  # -z (Down/Ground)
         ])
-        b_map = np.array([100.0, 0.0, 100.0, 0.0, 15.0, 0.0])
+        b_map = np.array([north_end, 0.0, east_end, 0.0, alt_end, 0.0])
         
         for i, sfc in enumerate(sfc_constraints):
             # ---------------------------------------------------------
@@ -211,6 +214,38 @@ class TrajectoryPlanner:
             # ---------------------------------------------------------
             A_mat = np.vstack((sfc['A'], A_map))
             b_vec = np.concatenate((np.array(sfc['b']).flatten(), b_map))
+
+            # ---------------------------------------------------------
+            # VIRTUAL RUNWAY LOGIC
+            # ---------------------------------------------------------
+            if getattr(self, 'spline_type', 'natural') == "natural":
+                # Only apply to the takeoff and landing corridors
+                if i == 0 or i == len(sfc_constraints) - 1:
+                    runway_length = 30.0
+                    
+                    # Scan every wall in the combined matrix
+                    for k in range(len(b_vec)):
+                        normal = A_mat[k]
+                        val = b_vec[k]
+                        
+                        # Relax X Map Boundaries
+                        if np.allclose(normal, [1, 0, 0]) and np.isclose(val, north_end, atol=1e-2):
+                            b_vec[k] += runway_length
+                        elif np.allclose(normal, [-1, 0, 0]) and np.isclose(val, 0.0, atol=1e-2):
+                            b_vec[k] += runway_length
+                            
+                        # Relax Y Map Boundaries
+                        elif np.allclose(normal, [0, 1, 0]) and np.isclose(val, east_end, atol=1e-2):
+                            b_vec[k] += runway_length
+                        elif np.allclose(normal, [0, -1, 0]) and np.isclose(val, 0.0, atol=1e-2):
+                            b_vec[k] += runway_length
+                            
+                        # Relax Z Map Boundaries (Ceiling and Floor)
+                        elif np.allclose(normal, [0, 0, 1]) and np.isclose(val, alt_end, atol=1e-2):
+                            b_vec[k] += runway_length
+                        elif np.allclose(normal, [0, 0, -1]) and np.isclose(val, 0.0, atol=1e-2):
+                            b_vec[k] += runway_length
+            # ---------------------------------------------------------
             
             num_pts_in_box = num_pts_list[i]
             # This automatically adjusts to the new size (original + 6 map walls)
@@ -277,12 +312,25 @@ if __name__ == "__main__":
     northEnd = FLOATING_PARAM.northEnd
     eastEnd = FLOATING_PARAM.eastEnd
     altitudeEnd = -FLOATING_PARAM.altitudeEnd
-    downEnd = -FLOATING_PARAM.downEnd
+    downEnd = FLOATING_PARAM.downEnd
+
+    map_bounds = (northEnd, eastEnd, downEnd)
 
     start = FLOATING_PARAM.startPosition_3D
     goal = FLOATING_PARAM.endPosition_3D
 
-    planner = TrajectoryPlanner(map_config=mock_map, spline_type="clamped")
+    spline_type="clamped"
+
+    sfc_height = 5.
+    sfc_width = 5.
+
+    sfc_start_ext = 5.
+    sfc_end_ext = 5.
+
+    planner = TrajectoryPlanner(map_config=mock_map, map_bounds=map_bounds, 
+                                spline_type=spline_type, sfc_height=sfc_height, 
+                                sfc_width=sfc_width, sfc_start_ext=sfc_start_ext, 
+                                sfc_end_ext=sfc_end_ext)
     controlPointsList, waypoints_smooth, _ = planner.plan_mission(start, goal)
 
 

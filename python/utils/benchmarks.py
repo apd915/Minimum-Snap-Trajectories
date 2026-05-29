@@ -342,10 +342,20 @@ def run_benchmark_suite(num_trials=100):
         
         # 1. Generate the random environment (Using the helper from earlier)
         random_obstacles = generate_random_city()
+
+        spline_type="natural"
+
+        sfc_height = 5.
+        sfc_width = 5.
+
+        sfc_start_ext = 5.
+        sfc_end_ext = 5.
         
         # 2. Setup your Planner dynamically
         from trajectory_planner import TrajectoryPlanner
-        planner = TrajectoryPlanner(map_config="RANDOM")
+        planner = TrajectoryPlanner(map_config="RANDOM", spline_type=spline_type, 
+                                    sfc_height =sfc_height , sfc_width =sfc_width , 
+                                    sfc_start_ext =sfc_start_ext , sfc_end_ext =sfc_end_ext )
         
         # Inject our random map into your existing grid logic
         planner.front_end.discrete_grid.occupied_voxels_inflated.clear()
