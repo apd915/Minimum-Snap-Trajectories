@@ -325,8 +325,6 @@ if __name__ == "__main__":
 
     min_snap_evaluator = MinSnapEvalClamped(BASE_SEGMENTS, snap_degree)
     Q = min_snap_evaluator.get_Q_matrix()
-
-    print("\n--- Running Performance Test: 100 Random Trajectories ---")
     
     # Start the high-precision timer
 
@@ -368,7 +366,7 @@ if __name__ == "__main__":
 
     # print("\n--- 3D Minimum Snap Control Points ---")
     # print(C_p_snap)
-    from utils.visualization import plot_trajectory, plot_course_trajectory
+    from utils.visualization import plot_trajectory
     plot_trajectory(C_p_snap, min_snap_evaluator.knots, snap_degree, minvo_stencils=True)
 
 

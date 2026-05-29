@@ -384,22 +384,22 @@ if __name__ == "__main__":
     W = min_snap_evaluator.get_W_matrix()
     Q = min_snap_evaluator.Q
 
-    D_vel = min_snap_evaluator._get_fast_cascaded_D_matrix(BASE_SEGMENTS, degree, 1).T
-    D_accel = min_snap_evaluator._get_fast_cascaded_D_matrix(BASE_SEGMENTS, degree, 2).T
+    # D_vel = min_snap_evaluator._get_fast_cascaded_D_matrix(BASE_SEGMENTS, degree, 1).T
+    # D_accel = min_snap_evaluator._get_fast_cascaded_D_matrix(BASE_SEGMENTS, degree, 2).T
 
     i_tot = 1
     for i in range(i_tot):
         snap_num_segments = BASE_SEGMENTS
 
         # Define the map dimensions (X, Y, Z)
-        map_size = np.array([[40.0], [40.0], [5.0]])
+        # map_size = np.array([[40.0], [40.0], [5.0]])
 
         # Generate random start and end conditions
-        p0 = np.random.rand(3, 1) * map_size
+        p0 = np.random.rand(3, 1) * 10
         v0 = np.random.rand(3, 1) * 5 - 2.5
         a0 = np.random.rand(3, 1) * 2 - 1
         
-        pf = np.random.rand(3, 1) * map_size
+        pf = np.random.rand(3, 1) * 10
         vf = np.random.rand(3, 1) * 5 - 2.5
         af = np.random.rand(3, 1) * 2 - 1
 
