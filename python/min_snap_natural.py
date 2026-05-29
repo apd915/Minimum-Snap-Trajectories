@@ -378,7 +378,7 @@ if __name__ == "__main__":
     
     start_time = time.perf_counter()
     
-    min_snap_evaluator = MinSnapEval(BASE_SEGMENTS, degree)
+    min_snap_evaluator = MinSnapEvalNatural(BASE_SEGMENTS, degree)
     knots = min_snap_evaluator.knots
 
     W = min_snap_evaluator.get_W_matrix()
@@ -395,20 +395,20 @@ if __name__ == "__main__":
         map_size = np.array([[40.0], [40.0], [5.0]])
 
         # Generate random start and end conditions
-        # p0 = np.random.rand(3, 1) * map_size
-        # v0 = np.random.rand(3, 1) * 5 - 2.5
-        # a0 = np.random.rand(3, 1) * 2 - 1
+        p0 = np.random.rand(3, 1) * map_size
+        v0 = np.random.rand(3, 1) * 5 - 2.5
+        a0 = np.random.rand(3, 1) * 2 - 1
         
-        # pf = np.random.rand(3, 1) * map_size
-        # vf = np.random.rand(3, 1) * 5 - 2.5
-        # af = np.random.rand(3, 1) * 2 - 1
+        pf = np.random.rand(3, 1) * map_size
+        vf = np.random.rand(3, 1) * 5 - 2.5
+        af = np.random.rand(3, 1) * 2 - 1
 
-        p0 = np.array([[0],[0],[0]])
-        v0 = np.array([[-10],[-10],[10]])
-        a0 = np.array([[0],[0],[0]])
-        pf = np.array([[10],[10],[10]])
-        vf = np.array([[-10],[-10],[-10]])
-        af = np.array([[0],[0],[0]])
+        # p0 = np.array([[0],[0],[0]])
+        # v0 = np.array([[-10],[-10],[10]])
+        # a0 = np.array([[0],[0],[0]])
+        # pf = np.array([[10],[10],[10]])
+        # vf = np.array([[-10],[-10],[-10]])
+        # af = np.array([[0],[0],[0]])
         
         S = np.hstack((p0, v0, a0))
         E = np.hstack((pf, vf, af))
@@ -486,7 +486,7 @@ if __name__ == "__main__":
 
     # Plot the last trajectory from the loop
     from utils.visualization import plot_trajectory, plot_kinematics
-    plot_trajectory(C_p_min_snap_constrained, min_snap_evaluator.knots, degree)
+    plot_trajectory(C_p_min_snap_constrained, min_snap_evaluator.knots, degree,spline_type='natural', minvo_stencils=True)
     # plot_trajectory(C_p_min_snap_constrained, min_snap_evaluator.knots, degree, minvo_stencils=MINVO_STENCILS)
     # plot_kinematics(C_p_min_snap_constrained, min_snap_evaluator.knots, degree, V_max, A_max) # Verify the physics!
 
