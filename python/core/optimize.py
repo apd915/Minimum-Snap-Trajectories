@@ -2,6 +2,7 @@ import numpy as np
 from scipy.optimize import minimize
 import scipy.sparse as sparse
 import osqp
+from core.minvo_bounds_clamped import MINVO_CLAMPED_STENCILS
 from core.minvo_bounds import MINVO_STENCILS
 
 # def run_qp_solver(objective_matrix, equality_constraints, inequality_constraints, initial_guess, A_eq, degree):
@@ -151,7 +152,75 @@ def build_minvo_sparse_matrix(D_matrix, F_matrix, current_degree):
     return A_minvo
 
 
-def run_qp_solver(objective_matrix, equality_constraints, inequality_constraints, initial_guess, A_eq, degree, use_minvo=True):
+def build_minvo_kinodynamic_matrix(D_matrix, current_degree, spline_type="clamped"):
+    """
+    Compiles the massive sparse matrix that applies MINVO kinematics simultaneously across the trajectory.
+    Routes logic based on whether the spline is "natural" (sliding window) or "clamped" (boundary distorted).
+    """
+    num_deriv_points = D_matrix.shape[0]
+    total_spans = num_deriv_points - current_degree
+    
+    rows = []
+    cols = []
+    data = []
+    row_idx = 0
+    
+    # -----------------------------------------------------
+    # PATH A: The Clamped Stencil Logic (MADER)
+    # -----------------------------------------------------
+    if spline_type == "clamped":
+        stencils = MINVO_CLAMPED_STENCILS[current_degree]
+        
+        for span_idx in range(total_spans):
+            # 1. Grab the correct stencil based on physical position
+            if span_idx < current_degree:
+                F_matrix = stencils[f'start_{span_idx}']
+            elif span_idx >= total_spans - current_degree:
+                end_idx = total_spans - 1 - span_idx
+                F_matrix = stencils[f'end_{end_idx}']
+            else:
+                F_matrix = stencils['interior']
+                
+            # 2. Apply it to the sparse mapping
+            num_minvo_pts = F_matrix.shape[0]
+            for i in range(num_minvo_pts):
+                for j in range(current_degree + 1):
+                    val = F_matrix[i, j]
+                    if abs(val) > 1e-9:
+                        rows.append(row_idx)
+                        cols.append(span_idx + j) 
+                        data.append(val)
+                row_idx += 1
+                
+    # -----------------------------------------------------
+    # PATH B: The Natural Stencil Logic (Standard Sliding Window)
+    # -----------------------------------------------------
+    elif spline_type == "natural":
+        F_matrix = MINVO_STENCILS[current_degree]
+        num_minvo_pts = F_matrix.shape[0]
+        
+        for span_idx in range(total_spans):
+            for i in range(num_minvo_pts):
+                for j in range(current_degree + 1):
+                    val = F_matrix[i, j]
+                    if abs(val) > 1e-9:
+                        rows.append(row_idx)
+                        cols.append(span_idx + j)
+                        data.append(val)
+                row_idx += 1
+                
+    else:
+        raise ValueError("spline_type must be 'clamped' or 'natural'")
+        
+    # Assemble the Mapping matrix
+    M_mapping = sparse.coo_matrix((data, (rows, cols)), shape=(row_idx, num_deriv_points)).tocsc()
+    
+    # Multiply it by the Calculus Derivative matrix to get the final Kinodynamic Bounds!
+    A_minvo = M_mapping @ sparse.csc_matrix(D_matrix)
+    return A_minvo
+
+
+def run_qp_solver(objective_matrix, equality_constraints, inequality_constraints, initial_guess, A_eq, degree, spline_type="clamped", use_minvo=True):
     """
     Executes a lightning-fast OSQP 3D Minimum Snap optimization.
     Enforces Boundary Conditions, Safe Flight Corridors (SFCs), and Kinodynamic Limits.
@@ -199,20 +268,25 @@ def run_qp_solver(objective_matrix, equality_constraints, inequality_constraints
     # ==========================================
     # 4. KINODYNAMIC CONSTRAINTS (Toggle MINVO vs Standard)
     # ==========================================
-    if use_minvo:
-        print("[OSQP] Formatting Matrices with MINVO Kinodynamic Bounds...")
-        # Grab the correct MINVO transformation matrices
-        F_vel = MINVO_STENCILS[degree - 1]
-        F_accel = MINVO_STENCILS[degree - 2]
+    # if use_minvo:
+    #     print("[OSQP] Formatting Matrices with MINVO Kinodynamic Bounds...")
+    #     # Grab the correct MINVO transformation matrices
+    #     F_vel = MINVO_STENCILS[degree - 1]
+    #     F_accel = MINVO_STENCILS[degree - 2]
 
-        # Create the base MINVO constraint matrices for 1D
-        A_vel_1D = build_minvo_sparse_matrix(D_vel, F_vel, degree - 1)
-        A_accel_1D = build_minvo_sparse_matrix(D_accel, F_accel, degree - 2)
-    else:
-        print("[OSQP] Formatting Matrices with Standard Convex Hull Bounds...")
-        # Fall back to raw derivative control points without the sliding window
-        A_vel_1D = sparse.csc_matrix(D_vel)
-        A_accel_1D = sparse.csc_matrix(D_accel)
+    #     # Create the base MINVO constraint matrices for 1D
+    #     A_vel_1D = build_minvo_sparse_matrix(D_vel, F_vel, degree - 1)
+    #     A_accel_1D = build_minvo_sparse_matrix(D_accel, F_accel, degree - 2)
+    # else:
+    #     print("[OSQP] Formatting Matrices with Standard Convex Hull Bounds...")
+    #     # Fall back to raw derivative control points without the sliding window
+    #     A_vel_1D = sparse.csc_matrix(D_vel)
+    #     A_accel_1D = sparse.csc_matrix(D_accel)
+    if use_minvo:
+        print(f"[OSQP] Formatting Matrices with {spline_type.upper()} MINVO Kinodynamic Bounds...")
+        # Use the new smart compiler!
+        A_vel_1D = build_minvo_kinodynamic_matrix(D_vel, degree - 1, spline_type)
+        A_accel_1D = build_minvo_kinodynamic_matrix(D_accel, degree - 2, spline_type)
 
     # Expand them to 3D (X, Y, Z)
     A_vel_3D = sparse.kron(A_vel_1D, sparse.eye(3)).tocsc()
