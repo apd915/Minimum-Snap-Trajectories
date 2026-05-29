@@ -131,7 +131,8 @@ class TrajectoryPlanner:
                     initial_guess=C_p_guess,
                     A_eq=A_eq,
                     degree=self.degree,
-                    use_minvo=False
+                    spline_type=self.spline_type,
+                    use_minvo=True
                 )
 
                 opt_duration = time.perf_counter() - opt_start_time 

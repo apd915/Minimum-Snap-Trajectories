@@ -71,7 +71,7 @@ class MinSnapEvalClamped:
         self.B_combined = U1 # For OSQP A_eq extraction
 
         # 1. Grab the Blended W Matrix
-        W = self.get_W_matrix(rho_snap=1.0)
+        W = self.get_W_matrix()
 
         # S_d4_M, snap_knots = self._get_S_matrix(self.degree, self.degree, self.knots, self.num_control_points)
 
@@ -369,7 +369,7 @@ if __name__ == "__main__":
     # print("\n--- 3D Minimum Snap Control Points ---")
     # print(C_p_snap)
     from utils.visualization import plot_trajectory, plot_course_trajectory
-    plot_trajectory(C_p_snap, min_snap_evaluator.knots, snap_degree, minvo_stencils=MINVO_CLAMPED_STENCILS)
+    plot_trajectory(C_p_snap, min_snap_evaluator.knots, snap_degree, minvo_stencils=True)
 
 
     # from utils.benchmarks import run_batch_performance_test_clamped, run_clamped_performance_benchmark

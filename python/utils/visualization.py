@@ -8,7 +8,7 @@ import numpy as np
 # ==========================================
 # UTILITY & VISUALIZATION
 # ==========================================
-def plot_trajectory(ctrl_pts, knots, degree, spline_type="clamped", minvo_stencils=None):
+def plot_trajectory(ctrl_pts, knots, degree, spline_type="clamped", minvo_stencils=False):
     """
     Evaluates and plots the 3D Minimum Snap Trajectory and its control polygon.
     """
@@ -22,7 +22,7 @@ def plot_trajectory(ctrl_pts, knots, degree, spline_type="clamped", minvo_stenci
     ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], c='red', s=30)
 
     # 2. Plot the MINVO Polygons (The tight "shrink-wrap")
-    if minvo_stencils is not None:
+    if minvo_stencils:
         
         # Calculate how many segments make up this flight path
         num_segments = len(pts) - degree
@@ -43,7 +43,7 @@ def plot_trajectory(ctrl_pts, knots, degree, spline_type="clamped", minvo_stenci
                 else:
                     F = stencils['interior']
             else:
-                F = minvo_stencils[degree]
+                F = MINVO_STENCILS[degree]
 
             V_local = F @ C_local
             V_closed = np.vstack((V_local, V_local[0]))
