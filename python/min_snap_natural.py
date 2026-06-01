@@ -60,10 +60,10 @@ class MinSnapEvalNatural:
         Internal method to compute the Q mapping matrix via SVD.
         """
         self.B_combined, U1, U2, Sigma, V = self._create_SVD(self.num_control_points)
-        W = self.get_W_matrix()
+        self.W = self.get_W_matrix()
         
-        A_bar = (U2.T @ W @ U2).T
-        B_bar = (W @ U2).T
+        A_bar = (U2.T @ self.W @ U2).T
+        B_bar = (self.W @ U2).T
         
         X_bar = np.linalg.solve(A_bar, B_bar)
         X = X_bar.T
@@ -298,32 +298,31 @@ class MinSnapEvalNatural:
         Cascades 4 derivative matrices to represent the 4th derivative (Snap).
         """
         M = self.M
+        W_total = np.zeros((self.num_control_points, self.num_control_points))
 
-        # 1. Calculate Snap W (4th derivative)
-        snap_minimization = 4        
-        D_snap = self._get_fast_cascaded_D_matrix(M, self.degree, snap_minimization)
-        S_snap = self._get_S_matrix(M, self.degree - snap_minimization)
-        W_snap = D_snap @ S_snap @ D_snap.T
+        if rho_snap > 0:
+            # 1. Calculate Snap W (4th derivative)
+            snap_minimization = 4        
+            D_snap = self._get_fast_cascaded_D_matrix(M, self.degree, snap_minimization)
+            S_snap = self._get_S_matrix(M, self.degree - snap_minimization)
+            W_total += rho_snap*(D_snap @ S_snap @ D_snap.T)
 
-        if self.degree <= 4:
+        if rho_accel > 0 and self.degree <= 4:
             # 2. Calculate Accel W (2nd derivative)
             accel_minimization = 2
             D_accel = self._get_fast_cascaded_D_matrix(M, self.degree, accel_minimization)
             S_accel = self._get_S_matrix(M, self.degree - accel_minimization)
-            W_accel = D_accel @ S_accel @ D_accel.T
+            W_total += rho_accel*(D_accel @ S_accel @ D_accel.T)
 
+        if rho_vel > 0 and self.degree <= 4:
             # 2. Calculate Vel W (1st derivative)
             vel_minimization = 1
             D_vel = self._get_fast_cascaded_D_matrix(M, self.degree, vel_minimization)
             S_vel = self._get_S_matrix(M, self.degree - vel_minimization)
-            W_vel = D_vel @ S_vel @ D_vel.T
+            W_total += rho_vel*(D_vel @ S_vel @ D_vel.T)
 
-            # 3. Blend them together!
-            W_total = (rho_snap * W_snap) + (rho_accel * W_accel) + (rho_vel * W_vel)
-            return W_total
+        return W_total
         
-        return W_snap
-    
 
     def get_sfc_matrices(self, sfc_constraints, num_pts_list):
         """
@@ -395,20 +394,20 @@ if __name__ == "__main__":
         # map_size = np.array([[40.0], [40.0], [5.0]])
 
         # Generate random start and end conditions
-        p0 = np.random.rand(3, 1) * 10
-        v0 = np.random.rand(3, 1) * 5 - 2.5
-        a0 = np.random.rand(3, 1) * 2 - 1
+        # p0 = np.random.rand(3, 1) * 10
+        # v0 = np.random.rand(3, 1) * 5 - 2.5
+        # a0 = np.random.rand(3, 1) * 2 - 1
         
-        pf = np.random.rand(3, 1) * 10
-        vf = np.random.rand(3, 1) * 5 - 2.5
-        af = np.random.rand(3, 1) * 2 - 1
+        # pf = np.random.rand(3, 1) * 10
+        # vf = np.random.rand(3, 1) * 5 - 2.5
+        # af = np.random.rand(3, 1) * 2 - 1
 
-        # p0 = np.array([[0],[0],[0]])
-        # v0 = np.array([[-10],[-10],[10]])
-        # a0 = np.array([[0],[0],[0]])
-        # pf = np.array([[10],[10],[10]])
-        # vf = np.array([[-10],[-10],[-10]])
-        # af = np.array([[0],[0],[0]])
+        p0 = np.array([[0],[0],[0]])
+        v0 = np.array([[-10],[-10],[10]])
+        a0 = np.array([[0],[0],[0]])
+        pf = np.array([[10],[10],[10]])
+        vf = np.array([[-10],[-10],[-10]])
+        af = np.array([[0],[0],[0]])
         
         S = np.hstack((p0, v0, a0))
         E = np.hstack((pf, vf, af))

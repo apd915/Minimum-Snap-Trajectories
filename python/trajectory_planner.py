@@ -119,7 +119,7 @@ class TrajectoryPlanner:
                 B_d3 = optimizer._get_B_d3_matrix(self.degree)
                 SE_qp = SE @ B_d3
 
-            W = optimizer.get_W_matrix()
+            W = optimizer.W
             A_eq = optimizer.B_combined.T
 
             # 4. Run the QP Solver
@@ -319,7 +319,7 @@ if __name__ == "__main__":
     start = FLOATING_PARAM.startPosition_3D
     goal = FLOATING_PARAM.endPosition_3D
 
-    spline_type="clamped"
+    spline_type="natural"
 
     sfc_height = 5.
     sfc_width = 5.

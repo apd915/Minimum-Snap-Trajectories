@@ -71,16 +71,16 @@ class MinSnapEvalClamped:
         self.B_combined = U1 # For OSQP A_eq extraction
 
         # 1. Grab the Blended W Matrix
-        W = self.get_W_matrix()
+        self.W = self.get_W_matrix()
 
         # S_d4_M, snap_knots = self._get_S_matrix(self.degree, self.degree, self.knots, self.num_control_points)
 
         # # print(f'S_snap=\n{S_snap}\n\nS_d4_M=\n{S_d4_M}\n')
-        # W = self._get_W_matrix(S_d4_M, snap_knots)
+        # self.W = self._get_W_matrix(S_d4_M, snap_knots)
 
         # 2. Optimize the Inverse via LU Decomposition Linear Solve
-        A_bar = U2.T @ W @ U2
-        B_bar = U2.T @ W
+        A_bar = U2.T @ self.W @ U2
+        B_bar = U2.T @ self.W
         
         X_T = np.linalg.solve(A_bar, B_bar)
         X = X_T.T
@@ -332,20 +332,20 @@ if __name__ == "__main__":
     for i in range(i_tot):
         # Generate random 3x1 column vectors for the states
         # The scalars give them reasonable physical ranges (e.g., 0 to 10 meters for position)
-        p0 = np.random.rand(3, 1) * 10 
-        v0 = np.random.rand(3, 1) * 5 - 2.5
-        a0 = np.random.rand(3, 1) * 2 - 1
+        # p0 = np.random.rand(3, 1) * 10 
+        # v0 = np.random.rand(3, 1) * 5 - 2.5
+        # a0 = np.random.rand(3, 1) * 2 - 1
         
-        pf = np.random.rand(3, 1) * 10 
-        vf = np.random.rand(3, 1) * 5 - 2.5
-        af = np.random.rand(3, 1) * 2 - 1
+        # pf = np.random.rand(3, 1) * 10 
+        # vf = np.random.rand(3, 1) * 5 - 2.5
+        # af = np.random.rand(3, 1) * 2 - 1
 
-        # p0 = np.array([[0],[0],[0]])
-        # v0 = np.array([[-10],[-10],[10]])
-        # a0 = np.array([[0],[0],[0]])
-        # pf = np.array([[10],[10],[10]])
-        # vf = np.array([[-10],[-10],[-10]])
-        # af = np.array([[0],[0],[0]])
+        p0 = np.array([[0],[0],[0]])
+        v0 = np.array([[-10],[-10],[10]])
+        a0 = np.array([[0],[0],[0]])
+        pf = np.array([[10],[10],[10]])
+        vf = np.array([[-10],[-10],[-10]])
+        af = np.array([[0],[0],[0]])
         
         # Build the boundary constraint matrix
         A_p = np.hstack((p0, v0, a0, af, vf, pf))
