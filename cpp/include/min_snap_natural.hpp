@@ -45,6 +45,8 @@ private:
     // ---------------------------------------------------------
     // PRIVATE METHODS (Core Math)
     // ---------------------------------------------------------
+
+    Eigen::VectorXd createUniformKnotPoints(int16_t numCtrlPts, int8_t degree, double startTime);
     
     // Core SVD Solver sequence
     void calculateQ();
