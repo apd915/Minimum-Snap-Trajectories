@@ -7,3 +7,5 @@ rrt-astar_mavsim/
 Bad Path.png
 token.txt
 *.csv
+*.exe
+.vscode/
