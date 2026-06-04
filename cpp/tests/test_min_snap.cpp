@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "min_snap_natural.hpp" 
+#include "min_snap_clamped.hpp"
 #include <Eigen/Dense>
 #include <chrono>   // High-precision timing
 #include <iostream> // Printing to the terminal
@@ -64,4 +65,33 @@ TEST(MinSnapNaturalTest, UnconstrainedTrajectory) {
     // Google Test basic assertions to ensure matrix sizes are correct
     EXPECT_EQ(C_p_min_snap.rows(), 3);
     EXPECT_EQ(C_p_min_snap.cols(), base_segments + degree);
+}
+
+TEST(MinSnapClampedTest, UnconstrainedTrajectory) {
+    int8_t degree = 4;
+    int16_t base_segments = 15;
+
+    // Timer Start
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    MinSnapEvalClamped evaluator(base_segments, degree);
+    MatrixXd Q = evaluator.get_Q_matrix();
+    
+    // S, E, SE vectors exactly matching the Python/Natural test
+    MatrixXd SE(3, 6);
+    SE.col(0) = Vector3d(0, 0, 0);       // p0
+    SE.col(1) = Vector3d(-10, -10, 10);  // v0
+    SE.col(2) = Vector3d(0, 0, 0);       // a0
+    SE.col(3) = Vector3d(0, 0, 0);       // af
+    SE.col(4) = Vector3d(-10, -10, -10); // vf
+    SE.col(5) = Vector3d(10, 10, 10);    // pf
+    
+    MatrixXd C_p_snap = SE * Q;
+
+    // Timer Stop
+    auto end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> total_time = end_time - start_time;
+    
+    std::cout << "\n[ CLAMPED ENGINE ] Execution Time: " << total_time.count() * 1000.0 << " ms\n";
+    std::cout << C_p_snap.transpose() << "\n\n";
 }

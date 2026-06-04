@@ -20,6 +20,7 @@ find_package(GTest REQUIRED)
 # This is crucial so your Python scripts can import it later!
 add_library(min_snap_engine SHARED
     src/min_snap_natural.cpp
+    src/min_snap_clamped.cpp
 )
 
 # Tell the compiler where to find your .hpp header files

@@ -365,7 +365,7 @@ if __name__ == "__main__":
 
 
     # print("\n--- 3D Minimum Snap Control Points ---")
-    # print(C_p_snap)
+    print(C_p_snap.T)
     from utils.visualization import plot_trajectory
     plot_trajectory(C_p_snap, min_snap_evaluator.knots, snap_degree, minvo_stencils=True)
 
