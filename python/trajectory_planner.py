@@ -319,7 +319,7 @@ if __name__ == "__main__":
     start = FLOATING_PARAM.startPosition_3D
     goal = FLOATING_PARAM.endPosition_3D
 
-    spline_type="natural"
+    spline_type="clamped"
 
     sfc_height = 5.
     sfc_width = 5.

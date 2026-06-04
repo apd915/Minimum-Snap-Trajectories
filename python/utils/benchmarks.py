@@ -345,15 +345,15 @@ def run_benchmark_suite(num_trials=100):
 
         spline_type="natural"
 
-        sfc_height = 5.
-        sfc_width = 5.
+        sfc_height = 1.
+        sfc_width = 1.
 
         sfc_start_ext = 5.
         sfc_end_ext = 5.
         
         # 2. Setup your Planner dynamically
         from trajectory_planner import TrajectoryPlanner
-        planner = TrajectoryPlanner(map_config="RANDOM", spline_type=spline_type, 
+        planner = TrajectoryPlanner(map_config="RANDOM", map_bounds=(100.,100.,15.), spline_type=spline_type, 
                                     sfc_height =sfc_height , sfc_width =sfc_width , 
                                     sfc_start_ext =sfc_start_ext , sfc_end_ext =sfc_end_ext )
         

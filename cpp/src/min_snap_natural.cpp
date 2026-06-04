@@ -98,18 +98,19 @@ void MinSnapEvalNatural::calculateQ() {
     W_ = getWMatrix(0.0, 0.0, 1.0); // Minimize Snap (4th derivative)
 
     // 3. Solve the Minimum Energy System
-    // Project the penalty matrix onto the null space (U2)
     MatrixXd A_bar = svd.U2.transpose() * W_ * svd.U2;
     MatrixXd B_bar = svd.U2.transpose() * W_;
 
-    // Solve the linear system A_bar * X_T = B_bar
     // We use LDLT decomposition because A_bar is symmetric positive semi-definite
     MatrixXd X_T = A_bar.ldlt().solve(B_bar);
     MatrixXd X = X_T.transpose();
 
     // 4. Final Q is calculated via null space subtraction
     MatrixXd I = MatrixXd::Identity(numControlPoints_, numControlPoints_);
-    Q_ = svd.U1.transpose() * (I - X * svd.U2.transpose());
+    
+    // FIXED: Correctly reconstruct the pseudo-inverse: V * Sigma^-1 * U1^T
+    MatrixXd sigmaInv = svd.Sigma.inverse();
+    Q_ = svd.V * sigmaInv * svd.U1.transpose() * (I - X * svd.U2.transpose());
 }
 
 // ==========================================
@@ -218,29 +219,29 @@ Eigen::MatrixXd MinSnapEvalNatural::getSMatrix(int16_t M, int8_t k) {
     return S;
 }
 
-Eigen::MatrixXd MinSnapEvalNatural::getWMatrix(double rhoVel, double rhoAccel, double rhoSnap) {
-    Eigen::MatrixXd wTotal = Eigen::MatrixXd::Zero(numControlPoints_, numControlPoints_);
+MatrixXd MinSnapEvalNatural::getWMatrix(double rhoVel, double rhoAccel, double rhoSnap) {
+    MatrixXd wTotal = MatrixXd::Zero(numControlPoints_, numControlPoints_);
     
     if (rhoSnap > 0.0 && degree_ >= 4) {
-        Eigen::MatrixXd dSnap = getFastCascadedDMatrix(M_, degree_, 4);
-        Eigen::MatrixXd wSnap;
+        MatrixXd dSnap = getFastCascadedDMatrix(M_, degree_, 4);
+        MatrixXd wSnap;
         if (degree_ - 4 == 0) {
-            wSnap = dSnap.transpose() * dSnap;
+            wSnap = dSnap * dSnap.transpose(); // FIXED ORDER
         } else {
-            wSnap = dSnap.transpose() * getSMatrix(M_, degree_ - 4) * dSnap;
+            wSnap = dSnap * getSMatrix(M_, degree_ - 4) * dSnap.transpose(); // FIXED ORDER
         }
         wTotal += rhoSnap * wSnap;
     }
     
     if (rhoAccel > 0.0 && degree_ >= 2) {
-        Eigen::MatrixXd dAccel = getFastCascadedDMatrix(M_, degree_, 2);
-        Eigen::MatrixXd wAccel = dAccel.transpose() * getSMatrix(M_, degree_ - 2) * dAccel;
+        MatrixXd dAccel = getFastCascadedDMatrix(M_, degree_, 2);
+        MatrixXd wAccel = dAccel * getSMatrix(M_, degree_ - 2) * dAccel.transpose(); // FIXED ORDER
         wTotal += rhoAccel * wAccel;
     }
     
     if (rhoVel > 0.0 && degree_ >= 1) {
-        Eigen::MatrixXd dVel = getFastCascadedDMatrix(M_, degree_, 1);
-        Eigen::MatrixXd wVel = dVel.transpose() * getSMatrix(M_, degree_ - 1) * dVel;
+        MatrixXd dVel = getFastCascadedDMatrix(M_, degree_, 1);
+        MatrixXd wVel = dVel * getSMatrix(M_, degree_ - 1) * dVel.transpose(); // FIXED ORDER
         wTotal += rhoVel * wVel;
     }
 
@@ -384,7 +385,7 @@ SVDResult MinSnapEvalNatural::createSVD(int16_t numControlPoints) {
     
     // In Python, np.linalg.svd returns V transposed (Vh). 
     // Eigen returns V normally, so we transpose it here to match your exact Python logic.
-    result.V = svd.matrixV().transpose(); 
+    result.V = svd.matrixV(); 
 
     return result;
 }
@@ -439,4 +440,20 @@ pair<MatrixXd, VectorXd> MinSnapEvalNatural::getSfcMatrices(
     }
     
     return {aSfcTotal, bSfcTotal};
+}
+
+// ==========================================
+// PUBLIC GETTERS
+// ==========================================
+
+MatrixXd MinSnapEvalNatural::getQMatrix() const {
+    return Q_;
+}
+
+VectorXd MinSnapEvalNatural::getKnots() const {
+    return knots_;
+}
+
+MatrixXd MinSnapEvalNatural::getBCombined() const {
+    return BCombined_;
 }

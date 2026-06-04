@@ -483,6 +483,8 @@ if __name__ == "__main__":
     print(f"Total time for {i_tot} trajectories: {total_time:.6f} seconds")
     print(f"Average time per trajectory: {avg_time:.6f} seconds ({avg_time * 1000:.3f} ms)")
 
+    print(C_p_min_snap_constrained.T)
+
     # Plot the last trajectory from the loop
     from utils.visualization import plot_trajectory, plot_kinematics
     plot_trajectory(C_p_min_snap_constrained, min_snap_evaluator.knots, degree,spline_type='natural', minvo_stencils=True)
