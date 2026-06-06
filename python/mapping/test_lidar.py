@@ -2,9 +2,9 @@ import open3d as o3d
 import numpy as np
 
 # Replace this with the name of the file you pulled from the folder
-FILE_PATH = "/home/apd915/Minimum-Snap-Trajectories/data/vicon_easy.ply"  
+FILE_PATH = "/home/apd915/Documents/B-Splines/bspline_generator/Minimum-Snap-Trajectories/data/vicon_easy 1.ply"  
 
-def test_lidar_ingestion(file_path, voxel_size=0.2):
+def test_lidar_ingestion(file_path, voxel_size=0.04):
     print(f"Loading 3D point cloud from: {file_path}")
     pcd = o3d.io.read_point_cloud(file_path)
     

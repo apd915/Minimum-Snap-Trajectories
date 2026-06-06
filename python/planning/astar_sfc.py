@@ -137,90 +137,127 @@ class AStar_SFC_Planner:
     
     def is_line_of_sight_clear(self, idx_a, idx_b):
         """
-        Uses the continuous 3D Slab Method to check for intersections 
-        between a line segment and all inflated bounding boxes.
+        Checks for clear line of sight. Prioritizes perfect continuous math if available,
+        falls back to discrete voxel raycasting for LiDAR point clouds.
         """
-        res = self.voxel_grid.voxel_resolution
+        import numpy as np
         
-        # Convert integer indices back to continuous real-world meters
-        p0 = np.array(idx_a) * res
-        p1 = np.array(idx_b) * res
-        
-        # Direction vector of the ray
-        d = p1 - p0
-        
-        # Calculate inverse direction for fast multiplication.
-        # np.errstate suppresses warnings if d contains a zero (perfectly horizontal/vertical lines).
-        # A division by zero results in 'inf', which mathematically works perfectly in the Slab Method!
-        with np.errstate(divide='ignore'):
-            inv_d = 1.0 / d
+        # --- 1. CONTINUOUS FRONT-END (Perfect Math) ---
+        # If the simulation provided perfect bounding boxes, we absolutely want to use them!
+        if hasattr(self.voxel_grid, 'continuous_inflated_bounds') and len(self.voxel_grid.continuous_inflated_bounds) > 0:
+            res = self.voxel_grid.voxel_resolution
+            p0 = np.array(idx_a) * res
+            p1 = np.array(idx_b) * res
+            d = p1 - p0
             
-        for b_min, b_max in self.voxel_grid.continuous_inflated_bounds:
-            # Calculate intersection 't' values for all 3 axes simultaneously
-            t1 = (b_min - p0) * inv_d
-            t2 = (b_max - p0) * inv_d
-            
-            # Find entry and exit times for each axis
-            t_min = np.minimum(t1, t2)
-            t_max = np.maximum(t1, t2)
-            
-            # t_enter is the latest time it enters a slab. t_exit is the earliest it exits.
-            t_enter = np.max(t_min)
-            t_exit = np.min(t_max)
-            
-            # Check for collision.
-            # It hits the box IF it enters before it exits AND the collision happens 
-            # between our two waypoints (t between 0.0 and 1.0).
-            if t_enter <= t_exit and t_exit >= 0 and t_enter <= 1.0:
-                return False # Collision detected!
+            with np.errstate(divide='ignore'):
+                inv_d = 1.0 / d
                 
-        return True # Line of sight is completely clear
+            for b_min, b_max in self.voxel_grid.continuous_inflated_bounds:
+                t1 = (b_min - p0) * inv_d
+                t2 = (b_max - p0) * inv_d
+                t_min = np.minimum(t1, t2)
+                t_max = np.maximum(t1, t2)
+                t_enter = np.max(t_min)
+                t_exit = np.min(t_max)
+                
+                if t_enter <= t_exit and t_exit >= 0 and t_enter <= 1.0:
+                    return False
+            return True
+
+        # --- 2. DISCRETE LIDAR (Voxel Raycasting) ---
+        # If we are flying in a raw LiDAR map, we must use the discrete raycast.
+        elif hasattr(self.voxel_grid, 'occupied_voxels_inflated'):
+            p0 = np.array(idx_a)
+            p1 = np.array(idx_b)
+            dist = np.linalg.norm(p1 - p0)
+            
+            if dist == 0:
+                return True
+                
+            steps = int(np.ceil(dist * 2))
+            for i in range(1, steps):
+                t = i / steps
+                point = p0 + t * (p1 - p0)
+                voxel = tuple(np.round(point).astype(int))
+                
+                if voxel in self.voxel_grid.occupied_voxels_inflated:
+                    return False
+            return True
+            
+        else:
+            return True
     
     def get_safe_extension_length(self, idx_a, idx_b, requested_extension):
         """
         Fires a ray forward from idx_b to dynamically cap the extension 
-        so it never penetrates an inflated obstacle.
+        so it never penetrates an inflated obstacle. Hybrid function.
         """
+        import numpy as np
         if requested_extension <= 0.0:
             return 0.0
             
         res = self.voxel_grid.voxel_resolution
-        p0 = np.array(idx_a) * res
-        p1 = np.array(idx_b) * res
         
-        # 1. Get the direction vector
-        d = p1 - p0
-        dist = np.linalg.norm(d)
-        if dist == 0:
-            return 0.0
+        # --- 1. CONTINUOUS FRONT-END (Perfect Math) ---
+        if hasattr(self.voxel_grid, 'continuous_inflated_bounds') and len(self.voxel_grid.continuous_inflated_bounds) > 0:
+            p0 = np.array(idx_a) * res
+            p1 = np.array(idx_b) * res
             
-        # Unit vector of our approach
-        dir_unit = d / dist 
-        
-        with np.errstate(divide='ignore'):
-            inv_d = 1.0 / dir_unit
+            d = p1 - p0
+            dist = np.linalg.norm(d)
+            if dist == 0: return 0.0
+                
+            dir_unit = d / dist 
             
-        min_safe_distance = requested_extension
-        
-        # 2. Fast Vectorized Slab Check
-        for b_min, b_max in self.voxel_grid.continuous_inflated_bounds:
-            t1 = (b_min - p1) * inv_d
-            t2 = (b_max - p1) * inv_d
+            with np.errstate(divide='ignore'):
+                inv_d = 1.0 / dir_unit
+                
+            min_safe_distance = requested_extension
             
-            t_min = np.minimum(t1, t2)
-            t_max = np.maximum(t1, t2)
+            for b_min, b_max in self.voxel_grid.continuous_inflated_bounds:
+                t1 = (b_min - p1) * inv_d
+                t2 = (b_max - p1) * inv_d
+                
+                t_enter = np.max(np.minimum(t1, t2))
+                t_exit = np.min(np.maximum(t1, t2))
+                
+                if t_enter <= t_exit and t_exit >= 0:
+                    if t_enter > 0 and t_enter < min_safe_distance:
+                        min_safe_distance = max(0.0, t_enter - 0.01)
+            return min_safe_distance
+
+        # --- 2. DISCRETE LIDAR (Voxel Raycasting) ---
+        elif hasattr(self.voxel_grid, 'occupied_voxels_inflated'):
+            p0 = np.array(idx_a) * res
+            p1 = np.array(idx_b) * res
             
-            t_enter = np.max(t_min)
-            t_exit = np.min(t_max)
+            d = p1 - p0
+            dist = np.linalg.norm(d)
+            if dist == 0: return 0.0
             
-            # If the ray intersects the box in front of us...
-            if t_enter <= t_exit and t_exit >= 0:
-                # And the box is closer than our requested extension...
-                if t_enter > 0 and t_enter < min_safe_distance:
-                    # Cap the extension! (Subtract 0.01m epsilon so we don't scrape the wall)
-                    min_safe_distance = max(0.0, t_enter - 0.01)
-                    
-        return min_safe_distance
+            dir_unit = d / dist
+            
+            # Step size of half a voxel for guaranteed collision detection
+            step_size = res / 2.0
+            num_steps = int(np.ceil(requested_extension / step_size))
+            
+            min_safe_distance = requested_extension
+            
+            for i in range(1, num_steps + 1):
+                t_dist = i * step_size
+                point = p1 + dir_unit * t_dist
+                # Convert back to grid index
+                voxel = tuple(np.round(point / res).astype(int))
+                
+                if voxel in self.voxel_grid.occupied_voxels_inflated:
+                    # Collision detected! Cap the extension just before we hit the block
+                    min_safe_distance = max(0.0, t_dist - step_size)
+                    break
+            return min_safe_distance
+            
+        else:
+            return requested_extension
 
     def visualize_path(self):
         """
