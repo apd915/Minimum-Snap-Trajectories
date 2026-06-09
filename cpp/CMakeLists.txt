@@ -12,6 +12,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # search your system's /usr/include directories for them.
 find_package(Eigen3 REQUIRED)
 find_package(GTest REQUIRED)
+find_package(osqp REQUIRED)
 
 # ==========================================
 # 2. BUILD THE MATH ENGINE LIBRARY
@@ -21,13 +22,15 @@ find_package(GTest REQUIRED)
 add_library(min_snap_engine SHARED
     src/min_snap_natural.cpp
     src/min_snap_clamped.cpp
+    src/matrix_builder.cpp
+    src/optimize.cpp
 )
 
 # Tell the compiler where to find your .hpp header files
 target_include_directories(min_snap_engine PUBLIC include)
 
 # Link the Eigen3 math library to your engine
-target_link_libraries(min_snap_engine PUBLIC Eigen3::Eigen)
+target_link_libraries(min_snap_engine PUBLIC Eigen3::Eigen osqp::osqp)
 
 # ==========================================
 # 3. BUILD THE GOOGLE TEST SUITE
@@ -36,6 +39,7 @@ enable_testing()
 
 add_executable(bspline_tests
     tests/test_min_snap.cpp
+    tests/test_optimize.cpp
 )
 
 # Link the test suite to your engine AND to Google Test's main runner

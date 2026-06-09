@@ -2,7 +2,6 @@
 
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
-#include <osqp/osqp.h>
 
 namespace trajectory_planner {
 

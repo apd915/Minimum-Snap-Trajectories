@@ -1,6 +1,8 @@
 #include "optimize.hpp"
+#include <osqp/osqp.h>
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
 namespace trajectory_planner {
 
@@ -11,79 +13,94 @@ Eigen::VectorXd run_qp_solver(
     const Eigen::VectorXd& l, 
     const Eigen::VectorXd& u) 
 {
+    OSQPInt n = P.cols();
+    OSQPInt m = A.rows();
+
     // ==========================================
-    // 1. DATA CONVERSION (Eigen -> OSQP CSC format)
+    // 1. SAFE DATA CONVERSION (Eigen -> OSQP v1.0)
     // ==========================================
-    // OSQP strictly requires Compressed Sparse Column (CSC) format.
-    // Eigen::SparseMatrix is naturally CSC, so we just pass the internal pointers.
+    // OSQP v1.0 uses OSQPInt (usually 64-bit). Eigen uses 32-bit ints by default. 
+    // We copy the sparse index arrays to guarantee memory safety.
     
-    csc P_csc = { 
-        .nzmax = (c_int)P.nonZeros(),
-        .m = (c_int)P.rows(),
-        .n = (c_int)P.cols(),
-        .p = (c_int*)P.outerIndexPtr(),
-        .i = (c_int*)P.innerIndexPtr(),
-        .x = (c_float*)P.valuePtr()
-    };
+    std::vector<OSQPInt> P_i(P.innerIndexPtr(), P.innerIndexPtr() + P.nonZeros());
+    std::vector<OSQPInt> P_p(P.outerIndexPtr(), P.outerIndexPtr() + P.cols() + 1);
 
-    csc A_csc = { 
-        .nzmax = (c_int)A.nonZeros(),
-        .m = (c_int)A.rows(),
-        .n = (c_int)A.cols(),
-        .p = (c_int*)A.outerIndexPtr(),
-        .i = (c_int*)A.innerIndexPtr(),
-        .x = (c_float*)A.valuePtr()
-    };
+    std::vector<OSQPInt> A_i(A.innerIndexPtr(), A.innerIndexPtr() + A.nonZeros());
+    std::vector<OSQPInt> A_p(A.outerIndexPtr(), A.outerIndexPtr() + A.cols() + 1);
+
+    OSQPCscMatrix* P_csc = OSQPCscMatrix_new(
+        n, n, 
+        (OSQPInt)P.nonZeros(), 
+        (OSQPFloat*)P.valuePtr(), 
+        P_i.data(), 
+        P_p.data()
+    );
+
+    OSQPCscMatrix* A_csc = OSQPCscMatrix_new(
+        m, n, 
+        (OSQPInt)A.nonZeros(), 
+        (OSQPFloat*)A.valuePtr(), 
+        A_i.data(), 
+        A_p.data()
+    );
 
     // ==========================================
-    // 2. WORKSPACE AND SETTINGS SETUP
+    // 2. SETTINGS SETUP
     // ==========================================
-    osqp_settings* settings = (osqp_settings*)malloc(sizeof(osqp_settings));
+    OSQPSettings* settings = OSQPSettings_new();
     if (!settings) {
+        OSQPCscMatrix_free(P_csc);
+        OSQPCscMatrix_free(A_csc);
         throw std::runtime_error("Failed to allocate OSQP settings.");
     }
     
-    osqp_set_default_settings(settings);
-    
-    // Tuning parameters (matching your Python script)
-    settings->alpha = 1.6;        // Standard relaxation parameter
-    settings->eps_abs = 1e-3;     // Absolute tolerance
-    settings->eps_rel = 1e-3;     // Relative tolerance
-    settings->verbose = 0;        // Set to 1 to print OSQP solve times to console
-    settings->warm_start = 1;     // Speeds up sequential trajectory solving
+    settings->alpha = 1.6;        
+    settings->eps_abs = 1e-3;     
+    settings->eps_rel = 1e-3;   
+    settings->polishing = 1;  
+    settings->verbose = 0;        
+    settings->warm_starting = 1;  // Note: renamed from 'warm_start' in v1.0
 
-    osqp_workspace* work = nullptr;
+    // ==========================================
+    // 3. WORKSPACE SETUP
+    // ==========================================
+    OSQPSolver* solver = nullptr; // Note: renamed from 'osqp_workspace'
     
-    // Initialize the workspace with our problem data
-    c_int setup_status = osqp_setup(&work, &P_csc, q.data(), &A_csc, l.data(), u.data(), P.rows(), P.cols(), settings);
+    // v1.0 setup signature requires passing m and n directly
+    OSQPInt setup_status = osqp_setup(&solver, P_csc, (OSQPFloat*)q.data(), A_csc, (OSQPFloat*)l.data(), (OSQPFloat*)u.data(), m, n, settings);
     
     if (setup_status != 0) {
-        free(settings);
+        OSQPSettings_free(settings);
+        OSQPCscMatrix_free(P_csc);
+        OSQPCscMatrix_free(A_csc);
         throw std::runtime_error("OSQP Setup Failed! Error Code: " + std::to_string(setup_status));
     }
 
     // ==========================================
-    // 3. EXECUTE OPTIMIZATION
+    // 4. EXECUTE OPTIMIZATION
     // ==========================================
-    c_int solve_status = osqp_solve(work);
+    OSQPInt solve_status = osqp_solve(solver);
     
     // Status 1 = OSQP_SOLVED, Status 2 = OSQP_SOLVED_INACCURATE
-    if (solve_status != 0 && work->info->status_val != 1 && work->info->status_val != 2) {
-        // If it fails (e.g., Kinematically Infeasible), cleanup and throw so the caller can handle it (like stretching time)
-        osqp_cleanup(work);
-        free(settings);
-        throw std::runtime_error("OSQP Solve Failed! Solver Status: " + std::string(work->info->status));
+    if (solve_status != 0 && solver->info->status_val != 1 && solver->info->status_val != 2) {
+        OSQPInt status_code = solver->info->status_val;
+        osqp_cleanup(solver);
+        OSQPSettings_free(settings);
+        OSQPCscMatrix_free(P_csc);
+        OSQPCscMatrix_free(A_csc);
+        throw std::runtime_error("OSQP Solve Failed! Status Code: " + std::to_string(status_code));
     }
 
     // ==========================================
-    // 4. EXTRACT RESULTS AND CLEANUP
+    // 5. EXTRACT RESULTS AND CLEANUP
     // ==========================================
-    // Map the raw C array back into an Eigen::VectorXd
-    Eigen::VectorXd optimized_control_points = Eigen::Map<Eigen::VectorXd>(work->solution->x, P.cols());
+    Eigen::VectorXd optimized_control_points = Eigen::Map<Eigen::VectorXd>(solver->solution->x, n);
 
-    // Free the C-allocated memory to prevent leaks
-    osqp_cleanup(work);
-    free(settings);
+    // Free the C-allocated structs to prevent memory leaks
+    osqp_cleanup(solver);
+    OSQPSettings_free(settings);
+    OSQPCscMatrix_free(P_csc);
+    OSQPCscMatrix_free(A_csc);
 
     return optimized_control_points;
 }
