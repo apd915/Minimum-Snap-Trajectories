@@ -24,6 +24,7 @@ add_library(min_snap_engine SHARED
     src/min_snap_clamped.cpp
     src/matrix_builder.cpp
     src/optimize.cpp
+    src/astar_sfc.cpp
 )
 
 # Tell the compiler where to find your .hpp header files
@@ -40,6 +41,7 @@ enable_testing()
 add_executable(bspline_tests
     tests/test_min_snap.cpp
     tests/test_optimize.cpp
+    tests/test_astar.cpp
 )
 
 # Link the test suite to your engine AND to Google Test's main runner
