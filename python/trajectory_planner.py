@@ -354,4 +354,7 @@ if __name__ == "__main__":
         z_limits=FLOATING_PARAM.z_limits,
         aspectRatio=FLOATING_PARAM.aspect_ratio,
     )
+
+    print("[Matplotlib] Rendering 3D Polygons...")
+    
     plt.show()

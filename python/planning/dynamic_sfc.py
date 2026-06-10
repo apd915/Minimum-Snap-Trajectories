@@ -59,6 +59,7 @@ class MsgDynamicFlightCorridor:
         self.secondaryPosition = secondaryPosition
         self.box_min = box_min
         self.box_max = box_max
+        self.sfc = self
 
     def getNumDimensions(self): return self.numDimensions
     
@@ -83,6 +84,22 @@ class MsgDynamicFlightCorridor:
         
     def getDistancePrimaryToSecondary(self) -> float:
         return np.linalg.norm(self.secondaryPosition - self.primaryPosition)
+
+    def getAllVertices_3D(self):
+        """
+        Returns the 8 corners of the axis-aligned bounding box as a 3x8 numpy array.
+        The columns are specifically ordered to match the legacy PlotMapPath face indices.
+        """
+        xmin, ymin, zmin = self.box_min
+        xmax, ymax, zmax = self.box_max
+
+        # Columns correspond to vertices 0 through 7
+        vertices = np.array([
+            [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin], # X Coordinates
+            [ymin, ymin, ymax, ymax, ymin, ymin, ymax, ymax], # Y Coordinates
+            [zmin, zmin, zmin, zmin, zmax, zmax, zmax, zmax]  # Z Coordinates
+        ])
+        return vertices
 
 
 # ==========================================

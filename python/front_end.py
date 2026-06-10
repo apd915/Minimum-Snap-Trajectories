@@ -100,7 +100,7 @@ class FrontEndSFC:
             y_meters = np.array(y_idx) * self.voxel_resolution
             z_meters = np.array(z_idx) * self.voxel_resolution
             
-            self.visualize(x_meters, y_meters, z_meters, style='')
+            # self.visualize(x_meters, y_meters, z_meters, style='')
 
         # total = time.perf_counter() - beginning
         # print(f"Plannning took: {total}\n")
