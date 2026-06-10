@@ -305,7 +305,7 @@ def run_planner_and_visualize():
         line_set.lines = o3d.utility.Vector2iVector(lines)
         line_set.colors = o3d.utility.Vector3dVector(colors)
         
-        # geometries_to_draw.append(line_set)
+        geometries_to_draw.append(line_set)
         
         # B. Add the SFC Boxes (Cyan Wireframes)
         sfc_boxes = get_sfc_open3d_geometries(corridors)

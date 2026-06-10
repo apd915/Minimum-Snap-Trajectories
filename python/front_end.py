@@ -19,6 +19,7 @@ import rrt_mavsim.parameters.flightCorridor_parameters as FLIGHT
 # Discretization and A* imports
 from mapping.voxel_grid import SparseVoxelGrid
 from planning.astar_sfc import AStar_SFC_Planner
+from planning.dynamic_sfc import DynamicSFCGenerator, MsgDynamicFlightCorridor, StandaloneWaypointsSFC
 
 class FrontEndSFC:
     def __init__(self, sfc_height, sfc_width, sfc_start_ext, sfc_end_ext, spline_type="natural", map_type="FLOATING_BLOCKS", degree=4):
@@ -72,6 +73,20 @@ class FrontEndSFC:
             inflation_radius=self.inflation_radius
         )
         # ---------------------------------------------------------
+
+        # Convert raw discrete voxel indices back to continuous meters for the KD-Tree
+        raw_obstacle_meters = [
+            np.array(idx) * self.voxel_resolution 
+            for idx in self.discrete_grid.occupied_voxels_raw
+        ]
+        
+        # The KD-Tree builds itself in O(N log N) time right here!
+        self.sfc_generator = DynamicSFCGenerator(
+            raw_uninflated_obstacle_points=raw_obstacle_meters,
+            drone_radius=self.sfc_width / 2.0,  
+            max_radius=2.0  # Max expansion radius for the boxes
+        )
+        # =========================================================
 
         occupied_inflated = self.discrete_grid.occupied_voxels_inflated
         occupied_raw = self.discrete_grid.occupied_voxels_raw
@@ -133,8 +148,8 @@ class FrontEndSFC:
             pos_meters = (np.array(idx) * self.voxel_resolution).reshape(3, 1)
             continuous_path.append(pos_meters)
 
-        # 3. Build the MsgWaypoints_SFC object
-        waypoints_smooth = MsgWaypoints_SFC(numDimensions=FLOATING_PARAM.numDimensions)
+        # 3. Build the NEW StandaloneWaypointsSFC object
+        waypoints_smooth = StandaloneWaypointsSFC(numDimensions=FLOATING_PARAM.numDimensions)
         
         # Add the Start point
         waypoints_smooth.add(
@@ -145,13 +160,10 @@ class FrontEndSFC:
         )
 
         # 4. Generate the Safe Flight Corridors (SFCs) along the path
-        from rrt_mavsim.message_types.msg_flight_corridors import MsgFlightCorridor
-
         for i in range(1, len(continuous_path)):
             prev_pos = continuous_path[i-1]
             curr_pos = continuous_path[i]
             
-            # Add the waypoint
             is_goal = (i == len(continuous_path) - 1)
             waypoints_smooth.add(
                 position=curr_pos, 
@@ -160,76 +172,40 @@ class FrontEndSFC:
                 connectsToGoal=is_goal
             )
 
-            # -------------------------------------------------------------
-            # NEW: Dynamic Capping!
-            # We must convert the 3x1 continuous meter vectors back to 
-            # discrete voxel indices for the raycast check to work.
-            # -------------------------------------------------------------
-            idx_a = tuple(int(x) for x in np.ravel(prev_pos) // self.voxel_resolution)
-            idx_b = tuple(int(x) for x in np.ravel(curr_pos) // self.voxel_resolution)
+            # Determine safe extension caps for the start and end of the entire flight path
+            ext_start = 30.0 if i == 1 else self.sfc_start_ext
+            ext_end = 30.0 if is_goal else self.sfc_end_ext
             
-            # 1. Fire ray FORWARD to cap the end extension
-            safe_end_ext = self.path_gen_astar.get_safe_extension_length(idx_a, idx_b, self.sfc_end_ext)
+            # --- THE MAGIC HAPPENS HERE ---
+            box_min, box_max = self.sfc_generator.generate_sfc_for_segment(
+                prev_pos, 
+                curr_pos, 
+                start_ext_override=ext_start, 
+                end_ext_override=ext_end
+            )
             
-            # 2. Fire ray BACKWARD to cap the start extension (Notice the flipped indices!)
-            safe_start_ext = self.path_gen_astar.get_safe_extension_length(idx_b, idx_a, self.sfc_start_ext)
-
-            if self.spline_type == 'natural' and (i-1) == 0:
-                sfc = MsgFlightCorridor(
+            # Initialize our Lightweight Drop-in Replacement
+            sfc = MsgDynamicFlightCorridor(
+                numDimensions=FLOATING_PARAM.numDimensions,
                 primaryPosition=prev_pos,
                 secondaryPosition=curr_pos,
-                primaryPosition_index=i-1,
-                numDimensions=FLOATING_PARAM.numDimensions,
-                height=self.sfc_height,
-                width=self.sfc_width,
-                startExtension_length=30., 
-                endExtension_length=safe_end_ext
+                box_min=box_min,
+                box_max=box_max
             )
-                
-            elif self.spline_type == 'natural' and i == len(continuous_path) - 1:
-                sfc = MsgFlightCorridor(
-                primaryPosition=prev_pos,
-                secondaryPosition=curr_pos,
-                primaryPosition_index=i-1,
-                numDimensions=FLOATING_PARAM.numDimensions,
-                height=self.sfc_height,
-                width=self.sfc_width,
-                startExtension_length=safe_start_ext, 
-                endExtension_length=30.
-            )
-                
-            else:
-                # Create the SFC object using the mathematically proven safe bounds!
-                sfc = MsgFlightCorridor(
-                    primaryPosition=prev_pos,
-                    secondaryPosition=curr_pos,
-                    primaryPosition_index=i-1,
-                    numDimensions=FLOATING_PARAM.numDimensions,
-                    height=self.sfc_height,
-                    width=self.sfc_width,
-                    startExtension_length=safe_start_ext, 
-                    endExtension_length=safe_end_ext
-                )
+            # ------------------------------
             
             waypoints_smooth.addSFC(sfc)
             
         corridors = waypoints_smooth.getAllFlightCorridors()
         print(f"[Front-End] Extracted {len(corridors)} Safe Flight Corridors via A*.")
 
-        # # 5. Calculate Control Point Allocation (Using your existing tools!)
-        # from rrt_mavsim.tools.waypointsTools import getNumCntPts_list
-        # num_pts_list = getNumCntPts_list(
-        #     waypoints=waypoints_smooth, 
-        #     numPointsPerUnit=num_points_per_unit
-        # )
-
         # 5. Calculate Control Point Allocation (Dynamic Kinematic & Local Support)
         num_pts_list = self.allocate_dynamic_control_points(
             corridors=corridors,
             degree=self.degree,
-            v_max=3.0,       # Max drone speed
-            a_max=2.0,       # Max drone acceleration
-            pts_per_sec=1.0  # Desired temporal density 
+            v_max=3.0,       
+            a_max=2.0,       
+            pts_per_sec=1.0  
         )
 
         # 6. Extract the A and b constraint matrices for the OSQP solver
@@ -241,11 +217,7 @@ class FrontEndSFC:
                 'b': b_vec
             })
 
-        # Add this line so the benchmarking script can grab the boxes later!
         self.last_corridors = corridors
-            
-        # Return the exact same 4-variable tuple that RRT did!
-        # (We return None for waypoints_not_smooth because A* doesn't need to keep the jagged path)
         return sfc_constraints, num_pts_list, waypoints_smooth, None
     
 
