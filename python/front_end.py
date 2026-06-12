@@ -19,7 +19,7 @@ import rrt_mavsim.parameters.flightCorridor_parameters as FLIGHT
 # Discretization and A* imports
 from mapping.voxel_grid import SparseVoxelGrid
 from planning.astar_sfc import AStar_SFC_Planner
-from planning.dynamic_sfc import DynamicSFCGenerator, MsgDynamicFlightCorridor, StandaloneWaypointsSFC
+from planning.dynamic_sfc import AsymmetricSFCManager, StandaloneWaypointsSFC
 
 class FrontEndSFC:
     def __init__(self, sfc_height, sfc_width, sfc_start_ext, sfc_end_ext, spline_type="natural", map_type="FLOATING_BLOCKS", degree=4):
@@ -59,8 +59,8 @@ class FrontEndSFC:
         # Define your resolution (e.g., 2.5 meters per voxel)
         self.voxel_resolution = 1 
         
-        # Define your drone's inflation radius (e.g., 2.5m for a 5m wide SFC)
-        self.inflation_radius = self.sfc_width/2
+        # Define your drone's inflation radius
+        self.drone_physical_radius = 0.5 
 
         # Initialize your discrete grid (Assuming you build a SparseVoxelGrid class)
         self.discrete_grid = SparseVoxelGrid(resolution=self.voxel_resolution)
@@ -70,7 +70,7 @@ class FrontEndSFC:
         continuous_obstacles = self.worldMap.get_obstacles()
         self.discrete_grid.populate_from_continuous(
             obstacles=continuous_obstacles, 
-            inflation_radius=self.inflation_radius
+            inflation_radius=self.drone_physical_radius
         )
         # ---------------------------------------------------------
 
@@ -80,48 +80,26 @@ class FrontEndSFC:
             for idx in self.discrete_grid.occupied_voxels_raw
         ]
         
-        # The KD-Tree builds itself in O(N log N) time right here!
-        self.sfc_generator = DynamicSFCGenerator(
+        # Define the physical constraints perfectly matching sfc_width
+        # max_cp_drift = 15.0
+        max_cp_drift = (self.sfc_width / 2.0) - self.drone_physical_radius
+        
+        # Initialize the Manager (Which automatically builds the 3 Layers)
+        self.sfc_manager = AsymmetricSFCManager(
             raw_uninflated_obstacle_points=raw_obstacle_meters,
-            drone_radius=self.sfc_width / 2.0,  
-            max_radius=2.0  # Max expansion radius for the boxes
+            drone_physical_radius=self.drone_physical_radius,  
+            max_cp_drift=max_cp_drift,
+            voxel_resolution=self.voxel_resolution
         )
-        # =========================================================
 
         occupied_inflated = self.discrete_grid.occupied_voxels_inflated
         occupied_raw = self.discrete_grid.occupied_voxels_raw
 
-        # beginning = time.perf_counter()
-
-        if len(occupied_inflated) > 0:
-            x_idx, y_idx, z_idx = zip(*occupied_inflated)
-            
-            x_meters = np.array(x_idx) * self.voxel_resolution
-            y_meters = np.array(y_idx) * self.voxel_resolution
-            z_meters = np.array(z_idx) * self.voxel_resolution
-            
-            # self.visualize(x_meters, y_meters, z_meters, style='')
-
-        # total = time.perf_counter() - beginning
-        # print(f"Plannning took: {total}\n")
 
         self.bounds = [(0,FLOATING_PARAM.northEnd), (0,FLOATING_PARAM.eastEnd), (0,FLOATING_PARAM.downEnd)]
 
         self.path_gen_astar = AStar_SFC_Planner(self.discrete_grid, self.bounds)
 
-        # # 2. Initialize Dean's RRT Planner
-        # self.path_gen = RRT_SFC_BSpline(
-        #     numDimensions=FLOATING_PARAM.numDimensions,
-        #     degree=self.degree,
-        #     M=FLIGHT.M,
-        #     Va=PLAN.Va0,
-        #     rho=FLIGHT.rho,
-        #     step_length=FLIGHT.segmentLength,
-        #     numDesiredInitPaths=FLIGHT.numInitialPaths,
-        #     # THE QUADROTOR HACK: We set chiMax to infinity. 
-        #     # This disables Dean's fixed-wing turn radius limitations!
-        #     chiMax=np.inf, 
-        # )
 
     def get_corridors_astar(self, start_pos, end_pos):
         # 1. Discretize and Search
@@ -166,33 +144,24 @@ class FrontEndSFC:
             
             is_goal = (i == len(continuous_path) - 1)
             waypoints_smooth.add(
-                position=curr_pos, 
-                parent=i-1, 
-                cost=0.0, 
-                connectsToGoal=is_goal
+                position=curr_pos, parent=i-1, cost=0.0, connectsToGoal=is_goal
             )
 
-            # Determine safe extension caps for the start and end of the entire flight path
-            ext_start = 30.0 if i == 1 else self.sfc_start_ext
-            ext_end = 30.0 if is_goal else self.sfc_end_ext
+            # Determine massive extensions only if natural splines are used
+            ext_start = self.sfc_start_ext
+            ext_end = self.sfc_end_ext
+            if self.spline_type == 'natural':
+                if i == 1: ext_start = 30.0
+                if is_goal: ext_end = 30.0
             
-            # --- THE MAGIC HAPPENS HERE ---
-            box_min, box_max = self.sfc_generator.generate_sfc_for_segment(
-                prev_pos, 
-                curr_pos, 
-                start_ext_override=ext_start, 
-                end_ext_override=ext_end
+            # The Manager runs Layer 1, 2, and 3, and returns the finished duck-typed object!
+            sfc = self.sfc_manager.generate_sfc(
+                pA=prev_pos, 
+                pB=curr_pos, 
+                W=self.sfc_width, 
+                ext_start=ext_start, 
+                ext_end=ext_end
             )
-            
-            # Initialize our Lightweight Drop-in Replacement
-            sfc = MsgDynamicFlightCorridor(
-                numDimensions=FLOATING_PARAM.numDimensions,
-                primaryPosition=prev_pos,
-                secondaryPosition=curr_pos,
-                box_min=box_min,
-                box_max=box_max
-            )
-            # ------------------------------
             
             waypoints_smooth.addSFC(sfc)
             

@@ -45,122 +45,301 @@ class StandaloneWaypointsSFC:
     def getFlightCorridor(self, index: int): return self.flightCorridors[index]
     def getNumNodes(self): return len(self.positions)
 
+    
 
-# ==========================================
-# 2. THE FLIGHT CORRIDOR (Replaces msg_flight_corridors.py)
-# ==========================================
-class MsgDynamicFlightCorridor:
+import numpy as np
+from scipy.spatial import KDTree
+
+class AsymmetricSFCManager:
+    def __init__(self, raw_uninflated_obstacle_points, drone_physical_radius, max_cp_drift, voxel_resolution=1.0):
+        self.r = drone_physical_radius
+        self.scanner = SpatialScannerKD(raw_uninflated_obstacle_points)
+        
+        # Pass the voxel resolution down to the math engine!
+        self.builder = AsymmetricBoxBuilder(drone_physical_radius, max_cp_drift, voxel_resolution)
+
+    def generate_sfc(self, pA, pB, W, ext_start, ext_end):
+        # LAYER 1: Fetch raw points
+        obs_points = self.scanner.get_broad_phase_obstacles(pA, pB, W, ext_start, ext_end)
+        
+        # LAYER 2: Calculate local frame and shrink bounds
+        ux, uy, uz, bounds = self.builder.build_bounds(pA, pB, obs_points, ext_start, ext_end)
+        
+        # LAYER 3: Translate to OSQP Matrices
+        A_mat, b_vec = OBBAdapters.get_osqp_matrices(pA, ux, uy, uz, bounds)
+        
+        # Create the duck-typed object for front_end.py
+        sfc = MsgAsymmetricOBB(
+            pA, pB, A_mat, b_vec, bounds, ux, uy, uz, self.r, numDimensions=3
+        )
+        return sfc
+
+class SpatialScannerKD:
+    def __init__(self, raw_uninflated_obstacle_points):
+        """
+        Initializes the spatial environment. 
+        In C++, this maps directly to an octree or PCL KD-Tree initialization.
+        """
+        points = np.array(list(raw_uninflated_obstacle_points))
+        # Build the tree once for the entire map
+        self.kd_tree = KDTree(points) if len(points) > 0 else None
+
+    def get_broad_phase_obstacles(self, pA, pB, W, ext_start, ext_end):
+        """
+        Drops W-spaced spheres along the vector and returns a deduplicated list 
+        of all obstacles caught within the 3D Pythagorean radius.
+        """
+        if self.kd_tree is None:
+            return []
+
+        pA = np.ravel(pA)
+        pB = np.ravel(pB)
+        dist = np.linalg.norm(pB - pA)
+        
+        # Calculate the unit directional vector
+        if dist == 0:
+            ux = np.array([1.0, 0.0, 0.0])
+        else:
+            ux = (pB - pA) / dist
+
+        # ----------------------------------------------------
+        # THE GEOMETRIC CONSTANTS
+        # ----------------------------------------------------
+        spacing = W
+        # The 3D Pythagorean Fix to guarantee zero blind spots
+        r_search = W * (np.sqrt(3.0) / 2.0) 
+
+        sample_points = []
+
+        # 1. Backward Extension Sampling
+        # Start at pA, walk backwards
+        backward_dist = 0.0
+        while backward_dist <= ext_start:
+            sample_points.append(pA - (ux * backward_dist))
+            backward_dist += spacing
+
+        # 2. Main Segment Sampling
+        # Start at pA, walk forwards to pB
+        segment_dist = 0.0
+        while segment_dist <= dist:
+            sample_points.append(pA + (ux * segment_dist))
+            segment_dist += spacing
+            
+        # Guarantee the exact end node is sampled
+        sample_points.append(pB)
+
+        # 3. Forward Extension Sampling
+        # Start at pB, walk forwards
+        forward_dist = spacing 
+        while forward_dist <= ext_end:
+            sample_points.append(pB + (ux * forward_dist))
+            forward_dist += spacing
+
+        # ----------------------------------------------------
+        # THE KD-TREE QUERY
+        # ----------------------------------------------------
+        obs_points_set = set()
+        
+        for pt in sample_points:
+            # We use query_ball_point instead of k=100. 
+            # This guarantees we fetch ALL obstacles in the radius, 
+            # completely eliminating the risk of missing a dense cluster of trees.
+            idxs = self.kd_tree.query_ball_point(pt, r=r_search)
+            for idx in idxs:
+                # Add to a set as a tuple to automatically remove duplicates
+                obs_points_set.add(tuple(self.kd_tree.data[idx]))
+                
+        # Convert the deduplicated tuples back into numpy arrays for Layer 2
+        return [np.array(pt) for pt in obs_points_set]
+    
+
+import numpy as np
+
+class AsymmetricBoxBuilder:
+    def __init__(self, drone_physical_radius, max_cp_drift, voxel_resolution=1.0):
+        """
+        Initializes the math engine with the physical constraints of the drone.
+        """
+        self.r = drone_physical_radius + (voxel_resolution / 2.0)
+        self.max_drift = max_cp_drift
+
+    def build_bounds(self, pA, pB, obs_points, ext_start, ext_end):
+        """
+        Calculates local axes and shrinks the maximum asymmetric boundaries.
+        Returns: ux, uy, uz, bounds_array
+        """
+        pA = np.ravel(pA)
+        pB = np.ravel(pB)
+        dist = np.linalg.norm(pB - pA)
+
+        # ----------------------------------------------------
+        # 1. ESTABLISH LOCAL COORDINATE FRAME
+        # ----------------------------------------------------
+        ux = (pB - pA) / dist if dist > 0 else np.array([1.0, 0.0, 0.0])
+        
+        global_up = np.array([0.0, 0.0, 1.0])
+        # Gimbal lock protection: if flying straight up/down, swap the reference vector
+        if np.abs(np.dot(ux, global_up)) > 0.99:
+            global_up = np.array([1.0, 0.0, 0.0])
+            
+        uy = np.cross(global_up, ux)
+        uy = uy / np.linalg.norm(uy) # Normalize lateral vector
+        uz = np.cross(ux, uy)        # Vertical vector is orthogonal to both
+
+        # ----------------------------------------------------
+        # 2. INITIALIZE MAXIMUM BOUNDS 
+        # Array format: [ +X, -X, +Y, -Y, +Z, -Z ]
+        # ----------------------------------------------------
+        bounds = np.array([
+            dist + ext_end,   # +X (Forward Runway)
+            ext_start,        # -X (Backward Runway)
+            self.max_drift,   # +Y (Left Wall)
+            self.max_drift,   # -Y (Right Wall)
+            self.max_drift,   # +Z (Ceiling)
+            self.max_drift    # -Z (Floor)
+        ])
+
+        # ----------------------------------------------------
+        # 3. NARROW-PHASE PROJECTION & SMART SHRINK
+        # ----------------------------------------------------
+        for obs in obs_points:
+            v = obs - pA
+            
+            # Project global coordinate onto local axes via Dot Product
+            proj_x = np.dot(v, ux)
+            proj_y = np.dot(v, uy)
+            proj_z = np.dot(v, uz)
+            
+            # Fast-fail: Is the obstacle totally outside our maximum possible length?
+            if not (-(bounds[1] + self.r) <= proj_x <= (bounds[0] + self.r)):
+                continue 
+
+            # Check if obstacle is inside the current Y/Z cross-section 
+            in_y_slice = -(bounds[3] + self.r) <= proj_y <= (bounds[2] + self.r)
+            in_z_slice = -(bounds[5] + self.r) <= proj_z <= (bounds[4] + self.r)
+                
+            # SCENARIO A: Obstacle is adjacent to the main A* segment
+            if 0 <= proj_x <= dist:
+                # Shrink Lateral Walls (Y) if obstacle is within vertical slice
+                if in_z_slice: 
+                    if proj_y > 0:
+                        bounds[2] = min(bounds[2], max(0.1, proj_y - self.r)) 
+                    elif proj_y < 0:
+                        bounds[3] = min(bounds[3], max(0.1, abs(proj_y) - self.r)) 
+                
+                # Shrink Vertical Walls (Z) if obstacle is within lateral slice
+                if in_y_slice: 
+                    if proj_z > 0:
+                        bounds[4] = min(bounds[4], max(0.1, proj_z - self.r)) 
+                    elif proj_z < 0:
+                        bounds[5] = min(bounds[5], max(0.1, abs(proj_z) - self.r)) 
+                        
+            # SCENARIO B: Obstacle is in the start/end Extensions
+            else:
+                # Only truncate X-axis length if it is directly inside the tunnel
+                if in_y_slice and in_z_slice:
+                    if proj_x > dist: # Obstacle is ahead
+                        bounds[0] = min(bounds[0], max(dist + 0.1, proj_x - self.r))
+                    elif proj_x < 0:  # Obstacle is behind
+                        bounds[1] = min(bounds[1], max(0.1, abs(proj_x) - self.r))
+
+        return ux, uy, uz, bounds
+    
+
+import numpy as np
+
+class OBBAdapters:
+    @staticmethod
+    def get_osqp_matrices(pA, ux, uy, uz, bounds):
+        """
+        Translates Layer 2 vectors into OSQP linear inequality constraints (Ax <= b).
+        """
+        # Formulate the A Matrix (The 6 Outward Normals)
+        A = np.vstack([ux, -ux, uy, -uy, uz, -uz])
+        
+        # Calculate the b Vector (Global offset distances)
+        b_base = A @ np.ravel(pA)
+        b_offset = np.array([
+            bounds[0], bounds[1], bounds[2], 
+            bounds[3], bounds[4], bounds[5]
+        ])
+        
+        b = b_base + b_offset
+        return A, b
+
+    @staticmethod
+    def get_visual_vertices(pA, ux, uy, uz, bounds, drone_radius):
+        """
+        Translates Layer 2 vectors into 8 physical 3D corners for Matplotlib/Rviz.
+        """
+        pA = np.ravel(pA)
+        
+        # Expand the bounds back out to their physical dimensions for plotting
+        xmax, xmin = bounds[0] + drone_radius, -(bounds[1] + drone_radius)
+        ymax, ymin = bounds[2] + drone_radius, -(bounds[3] + drone_radius)
+        zmax, zmin = bounds[4] + drone_radius, -(bounds[5] + drone_radius)
+        
+        # Hardcoded combinations to match Matplotlib's expected face indexing
+        x_vals = [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin]
+        y_vals = [ymin, ymin, ymax, ymax, ymin, ymin, ymax, ymax]
+        z_vals = [zmin, zmin, zmin, zmin, zmax, zmax, zmax, zmax]
+        
+        vertices = np.zeros((3, 8))
+        for i in range(8):
+            # Start at pA, walk along the local axes to reach the corner
+            corner = pA + (x_vals[i] * ux) + (y_vals[i] * uy) + (z_vals[i] * uz)
+            vertices[:, i] = corner
+            
+        return vertices
+    
+
+class MsgAsymmetricOBB:
     """
-    Axis-Aligned corridor that directly outputs OSQP matrices.
+    Oriented Bounding Box that directly outputs OSQP matrices and 
+    Matplotlib-compatible vertices for rendering.
     """
-    def __init__(self, numDimensions, primaryPosition, secondaryPosition, box_min, box_max):
+    def __init__(self, pA, pB, A_mat, b_vec, bounds, ux, uy, uz, drone_radius, numDimensions=3):
         self.numDimensions = numDimensions
-        self.primaryPosition = primaryPosition
-        self.secondaryPosition = secondaryPosition
-        self.box_min = box_min
-        self.box_max = box_max
-        self.sfc = self
+        self.primaryPosition = pA.reshape(3, 1)
+        self.secondaryPosition = pB.reshape(3, 1)
+        self.A_mat = A_mat
+        self.b_vec = b_vec
+        self.bounds = bounds
+        self.ux = ux
+        self.uy = uy
+        self.uz = uz
+        self.r = drone_radius
+        
+        # Plotter Duck-Typing
+        self.sfc = self 
 
     def getNumDimensions(self): return self.numDimensions
-    
-    # Dummy method to prevent downstream chained calls from breaking
     def getSFC(self): return self 
-
-    def getAbMatrices(self):
-        A = np.array([
-            [ 1.0,  0.0,  0.0],
-            [-1.0,  0.0,  0.0],
-            [ 0.0,  1.0,  0.0],
-            [ 0.0, -1.0,  0.0],
-            [ 0.0,  0.0,  1.0],
-            [ 0.0,  0.0, -1.0]
-        ])
-        b = np.array([
-            self.box_max[0], -self.box_min[0],
-            self.box_max[1], -self.box_min[1],
-            self.box_max[2], -self.box_min[2]
-        ])
-        return A, b
+    def getAbMatrices(self): return self.A_mat, self.b_vec
         
     def getDistancePrimaryToSecondary(self) -> float:
         return np.linalg.norm(self.secondaryPosition - self.primaryPosition)
 
     def getAllVertices_3D(self):
         """
-        Returns the 8 corners of the axis-aligned bounding box as a 3x8 numpy array.
-        The columns are specifically ordered to match the legacy PlotMapPath face indices.
+        Returns the 8 corners of the Asymmetric OBB as a 3x8 numpy array.
+        Mapped to the exact vertex connections the legacy Matplotlib viewer expects.
         """
-        xmin, ymin, zmin = self.box_min
-        xmax, ymax, zmax = self.box_max
-
-        # Columns correspond to vertices 0 through 7
-        vertices = np.array([
-            [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin], # X Coordinates
-            [ymin, ymin, ymax, ymax, ymin, ymin, ymax, ymax], # Y Coordinates
-            [zmin, zmin, zmin, zmin, zmax, zmax, zmax, zmax]  # Z Coordinates
-        ])
+        pA = self.primaryPosition.flatten()
+        
+        # Add the physical drone radius back so the plotted boxes represent the actual safe flight space
+        xmax, xmin = self.bounds[0] + self.r, -(self.bounds[1] + self.r)
+        ymax, ymin = self.bounds[2] + self.r, -(self.bounds[3] + self.r)
+        zmax, zmin = self.bounds[4] + self.r, -(self.bounds[5] + self.r)
+        
+        x_vals = [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin]
+        y_vals = [ymin, ymin, ymax, ymax, ymin, ymin, ymax, ymax]
+        z_vals = [zmin, zmin, zmin, zmin, zmax, zmax, zmax, zmax]
+        
+        vertices = np.zeros((3, 8))
+        for i in range(8):
+            # Scale the local axis vectors and add to origin pA
+            pt = pA + (x_vals[i] * self.ux) + (y_vals[i] * self.uy) + (z_vals[i] * self.uz)
+            vertices[:, i] = pt
+            
         return vertices
-
-
-# ==========================================
-# 3. THE GEOMETRIC GENERATOR
-# ==========================================
-class DynamicSFCGenerator:
-    def __init__(self, raw_uninflated_obstacle_points, drone_radius=0.25, max_radius=2.0):
-        self.r = drone_radius
-        self.max_r = max_radius
-        points = np.array(list(raw_uninflated_obstacle_points))
-        self.kd_tree = KDTree(points) if len(points) > 0 else None
-
-    def generate_sfc_for_segment(self, pA, pB, start_ext_override=None, end_ext_override=None):
-        pA = np.ravel(pA)
-        pB = np.ravel(pB)
-        
-        seg_min = np.minimum(pA, pB)
-        seg_max = np.maximum(pA, pB)
-        
-        ext_start = start_ext_override if start_ext_override else self.max_r
-        ext_end = end_ext_override if end_ext_override else self.max_r
-        max_search_dist = max(self.max_r, ext_start, ext_end)
-        
-        box_min = seg_min - max_search_dist
-        box_max = seg_max + max_search_dist
-
-        if self.kd_tree is None: return box_min, box_max
-            
-        dist = np.linalg.norm(pB - pA)
-        dir_vec = (pB - pA) / dist if dist > 0 else np.zeros(3)
-        
-        sample_points = []
-        for backward_dist in np.arange(0, ext_start + 0.1, self.max_r):
-            sample_points.append(pA - (dir_vec * backward_dist))
-        for forward_dist in np.arange(0, ext_end + 0.1, self.max_r):
-            sample_points.append(pB + (dir_vec * forward_dist))
-            
-        num_internal_samples = max(2, int(np.ceil(dist / self.max_r)) + 1)
-        for t in np.linspace(0, 1, num_internal_samples):
-            sample_points.append(pA + t * (pB - pA))
-            
-        obs_points = []
-        for pt in sample_points:
-            dists, idxs = self.kd_tree.query(pt, k=100, distance_upper_bound=self.max_r)
-            if np.isscalar(dists): dists, idxs = [dists], [idxs]
-            for d, idx in zip(dists, idxs):
-                if d != float('inf') and idx < len(self.kd_tree.data):
-                    obs_points.append(self.kd_tree.data[idx])
-                    
-        if not obs_points: return box_min, box_max
-        obs_points = np.unique(obs_points, axis=0)
-        
-        for obs in obs_points:
-            if (box_min[1] <= obs[1] <= box_max[1]) and (box_min[2] <= obs[2] <= box_max[2]):
-                if obs[0] > seg_max[0]: box_max[0] = min(box_max[0], obs[0] - self.r)
-                elif obs[0] < seg_min[0]: box_min[0] = max(box_min[0], obs[0] + self.r)
-            if (box_min[0] <= obs[0] <= box_max[0]) and (box_min[2] <= obs[2] <= box_max[2]):
-                if obs[1] > seg_max[1]: box_max[1] = min(box_max[1], obs[1] - self.r)
-                elif obs[1] < seg_min[1]: box_min[1] = max(box_min[1], obs[1] + self.r)
-            if (box_min[0] <= obs[0] <= box_max[0]) and (box_min[1] <= obs[1] <= box_max[1]):
-                if obs[2] > seg_max[2]: box_max[2] = min(box_max[2], obs[2] - self.r)
-                elif obs[2] < seg_min[2]: box_min[2] = max(box_min[2], obs[2] + self.r)
-
-        return box_min, box_max

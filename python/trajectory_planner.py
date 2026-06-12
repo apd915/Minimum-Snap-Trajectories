@@ -321,8 +321,8 @@ if __name__ == "__main__":
 
     spline_type="clamped"
 
-    sfc_height = 5.
-    sfc_width = 5.
+    sfc_height = 10.
+    sfc_width = 10.
 
     sfc_start_ext = 5.
     sfc_end_ext = 5.
@@ -341,11 +341,14 @@ if __name__ == "__main__":
             floatingBlocksParams=FloatingBlocksParams()
         )
     
+    # --- THE FIX: Only pass the list if the optimizer actually succeeded! ---
+    valid_control_points = [controlPointsList] if controlPointsList is not None else None
+    
     plotter = PlotMapPath(
         map=worldMap,
         waypoints_smooth=waypoints_smooth,
         controlPoints_not_smooth_list=None,
-        controlPoints_smooth_list=[controlPointsList],
+        controlPoints_smooth_list=valid_control_points,
     )
 
     plotter.plot(
