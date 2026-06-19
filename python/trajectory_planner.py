@@ -13,6 +13,49 @@ from min_snap_natural import MinSnapEvalNatural
 from min_snap_clamped import MinSnapEvalClamped
 from core.optimize import run_qp_solver
 
+def print_sfc_diagnostics(corridors):
+    """
+    Translates SFC bounds into physical dimensions and detects geometric anomalies.
+    """
+    print("\n" + "="*60)
+    print("                 SFC GEOMETRY DIAGNOSTICS")
+    print("="*60)
+    
+    for i, sfc in enumerate(corridors):
+        pA = sfc.primaryPosition.flatten()
+        pB = sfc.secondaryPosition.flatten()
+        
+        # 1. Physical Dimensions (Calculated from the bounds array)
+        b = sfc.bounds
+        L = b[0] + b[1]
+        W = b[2] + b[3]
+        H = b[4] + b[5]
+        
+        print(f"\n[ SFC {i} ]")
+        print(f"Segment:    A: {np.round(pA, 2)}  -->  B: {np.round(pB, 2)}")
+        print(f"Dimensions: Length: {L:>5.2f}m | Width: {W:>5.2f}m | Height: {H:>5.2f}m")
+        
+        # 2. Raw Constraint Bounds (Distance from the A* node to the wall)
+        print(f"Bounds:     +X (Fwd): {b[0]:>5.2f}m   | -X (Back): {b[1]:>5.2f}m")
+        print(f"            +Y (Lft): {b[2]:>5.2f}m   | -Y (Rgt):  {b[3]:>5.2f}m")
+        print(f"            +Z (Top): {b[4]:>5.2f}m   | -Z (Btm):  {b[5]:>5.2f}m")
+        
+        # 3. 3D Corners (Extracting max/min global boundaries)
+        x_corners, y_corners, z_corners = sfc.getAllVertices_3D()
+        z_max = max(z_corners)
+        z_min = min(z_corners)
+        print(f"Corners:    Global Z-Max: {z_max:>5.2f}m | Global Z-Min: {z_min:>5.2f}m")
+        
+        # 4. Anomaly Detection!
+        if W <= 0.0:
+            print("  >>> [FATAL] LATERAL WALLS COLLAPSED! (Negative Width) <<<")
+        if H <= 0.0:
+            print("  >>> [FATAL] CEILING CRUSHED FLOOR! (Negative Height) <<<")
+        if L <= 0.0:
+            print("  >>> [FATAL] X-AXIS TRUNCATED TO ZERO! (Negative Length) <<<")
+            
+    print("="*60 + "\n")
+
 class TrajectoryPlanner:
     def __init__(self, map_config, map_bounds=(100.,100.,15.), v_max=3.0, a_max=2.0, degree=4, spline_type="natural", sfc_height=1., sfc_width=1., sfc_start_ext=5., sfc_end_ext=5.):
         """
@@ -46,22 +89,20 @@ class TrajectoryPlanner:
         print("[Phase 1] Generating Safe Flight Corridors...")
         
         sfc_start_time = time.perf_counter()
-        sfc_constraints, num_pts_list, waypoints_smooth, waypoints_not_smooth = self.front_end.get_corridors_astar(start_pos, end_pos)
+        corridors, exclusive_pts_list, int_pts_list, waypoints_smooth, waypoints_not_smooth = self.front_end.get_corridors_astar(start_pos, end_pos)
         sfc_duration = time.perf_counter() - sfc_start_time
         
-        # Override the point allocation! 
-        # 0.003 points per meter * 5000 meters = ~15 control points total
-        # custom_point_density = 0.003 
         
-        # sfc_constraints, num_pts_list, waypoints_smooth, waypoints_not_smooth = self.front_end.get_corridors(
-        #     start_pos, 
-        #     end_pos, 
-        #     num_points_per_unit=custom_point_density
-        # )
-        
-        if not sfc_constraints:
+        if not corridors:
             print("[Error] No valid path found through the environment.")
             return None, None
+        
+        # DIAGNOSTIC TOOL
+        print_sfc_diagnostics(corridors)
+        # -------------------------------------
+
+        # # [Visual Check] - Render the map, the inflated voxels, and the path!
+        # self.front_end.visualize_debugging(waypoints_smooth)
 
         # [Visual Check] - Uncomment to pause and view SFCs before solving
         # print("[Visual Check] Displaying SFCs. Close the plot window to begin optimization...")
@@ -92,10 +133,12 @@ class TrajectoryPlanner:
         while stretch_count <= max_stretches:
             print(f"\n--- Optimization Attempt {stretch_count + 1} ---")
             
-            # 1. Calculate points and build matrices
-            total_control_points = sum(num_pts_list) - self.degree * (len(num_pts_list) - 1)
-            print(f"[Phase 2] Translating {len(sfc_constraints)} SFCs for {total_control_points} points...")
-            A_sfc, b_sfc = self._build_overlap_constraints(sfc_constraints, num_pts_list, total_control_points)
+            # 1. Ask the Front End to compile the matrices based on the CURRENT num_pts_list
+            A_sfc, b_sfc, total_control_points = self.front_end.compile_system_constraints(corridors, exclusive_pts_list, int_pts_list)
+            
+            # print(f"A_sfc:\n{A_sfc}\n")
+            # print(f"b_sfc:\n{b_sfc}\n")
+            print(f"[Phase 2] Translating {len(corridors)} SFCs for {total_control_points} points...")
 
             # 2. Initialize Backend Math
             opt_start_time = time.perf_counter()
@@ -147,8 +190,10 @@ class TrajectoryPlanner:
                 print(f"[Phase 4] Solver failed (Kinematically impossible): {e}")
                 
                 if stretch_count < max_stretches:
-                    print("[Phase 4] Stretching time allocation (+1 point to all SFCs)...")
-                    num_pts_list = [pts + 1 for pts in num_pts_list]
+                    print("[Phase 4] Stretching time allocation (+points to straights and intersections)...")
+                    # STRETCH BOTH POOLS!
+                    exclusive_pts_list = [pts + self.degree for pts in exclusive_pts_list]
+                    int_pts_list = [pts + 2 for pts in int_pts_list]
                 else:
                     print("[Error] Max stretching attempts reached.")
                 
@@ -316,7 +361,10 @@ if __name__ == "__main__":
 
     map_bounds = (northEnd, eastEnd, downEnd)
 
-    start = FLOATING_PARAM.startPosition_3D
+    startPosition_3D = np.array([[2.0],[2.0],[5.0]])
+    endPosition_3D = np.array([[northEnd-5],[eastEnd-5],[downEnd]])
+
+    start = startPosition_3D
     goal = FLOATING_PARAM.endPosition_3D
 
     spline_type="clamped"

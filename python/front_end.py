@@ -57,10 +57,14 @@ class FrontEndSFC:
 
         # 1.5. Transform map into voxel grid
         # Define your resolution (e.g., 2.5 meters per voxel)
-        self.voxel_resolution = 1 
+        self.voxel_resolution = 0.5 
         
-        # Define your drone's inflation radius
+        # Define your drone's physical radius
         self.drone_physical_radius = 0.5 
+
+        # Round up to the nearest whole voxel to prevent quantization loss!
+        inflation_voxels = np.ceil(self.drone_physical_radius / self.voxel_resolution)
+        self.grid_inflation_radius = inflation_voxels * self.voxel_resolution
 
         # Initialize your discrete grid (Assuming you build a SparseVoxelGrid class)
         self.discrete_grid = SparseVoxelGrid(resolution=self.voxel_resolution)
@@ -70,23 +74,28 @@ class FrontEndSFC:
         continuous_obstacles = self.worldMap.get_obstacles()
         self.discrete_grid.populate_from_continuous(
             obstacles=continuous_obstacles, 
-            inflation_radius=self.drone_physical_radius
+            inflation_radius=self.grid_inflation_radius
         )
         # ---------------------------------------------------------
 
-        # Convert raw discrete voxel indices back to continuous meters for the KD-Tree
+        # --- THE FIX: Pass INFLATED discrete voxel indices back to continuous meters for the KD-Tree! ---
+        # This perfectly aligns the continuous math engine with the discrete A* pathfinder.
+        self.inflated_obstacle_meters = [
+            np.array(idx) * self.voxel_resolution 
+            for idx in self.discrete_grid.occupied_voxels_inflated
+        ]
+        
         raw_obstacle_meters = [
             np.array(idx) * self.voxel_resolution 
             for idx in self.discrete_grid.occupied_voxels_raw
         ]
         
         # Define the physical constraints perfectly matching sfc_width
-        # max_cp_drift = 15.0
         max_cp_drift = (self.sfc_width / 2.0) - self.drone_physical_radius
         
-        # Initialize the Manager (Which automatically builds the 3 Layers)
+        # Initialize the Manager with RAW points
         self.sfc_manager = AsymmetricSFCManager(
-            raw_uninflated_obstacle_points=raw_obstacle_meters,
+            raw_uninflated_obstacle_points=raw_obstacle_meters, 
             drone_physical_radius=self.drone_physical_radius,  
             max_cp_drift=max_cp_drift,
             voxel_resolution=self.voxel_resolution
@@ -99,6 +108,7 @@ class FrontEndSFC:
         self.bounds = [(0,FLOATING_PARAM.northEnd), (0,FLOATING_PARAM.eastEnd), (0,FLOATING_PARAM.downEnd)]
 
         self.path_gen_astar = AStar_SFC_Planner(self.discrete_grid, self.bounds)
+
 
 
     def get_corridors_astar(self, start_pos, end_pos):
@@ -125,6 +135,42 @@ class FrontEndSFC:
             # .reshape(3, 1) is CRITICAL to match your existing matrix math!
             pos_meters = (np.array(idx) * self.voxel_resolution).reshape(3, 1)
             continuous_path.append(pos_meters)
+
+
+        # --- MATHEMATICAL CLIPPING DIAGNOSTIC ---
+        print("\n[Diagnostic] Checking A* Path against Inflated KD-Tree...")
+        path_is_safe = True
+        for i in range(1, len(continuous_path)):
+            pA = continuous_path[i-1].flatten()
+            pB = continuous_path[i].flatten()
+            
+            # Calculate segment length and direction
+            v = pB - pA
+            seg_len = np.linalg.norm(v)
+            if seg_len == 0: continue
+            u = v / seg_len
+            
+            # Check every inflated obstacle against the segment
+            for obs in self.inflated_obstacle_meters:
+                # 1. Project obstacle onto the line segment (dot product)
+                t = np.dot(obs - pA, u)
+                
+                # 2. Only care about obstacles directly adjacent to the segment
+                if 0 <= t <= seg_len:
+                    # 3. Calculate perpendicular distance from segment to obstacle
+                    proj_point = pA + t * u
+                    dist_to_line = np.linalg.norm(obs - proj_point)
+                    
+                    # If the distance is exactly 0, the line goes directly through the voxel center
+                    # If the distance is < the voxel resolution, it's clipping the physical block!
+                    if dist_to_line < self.voxel_resolution:
+                        print(f"  -> [WARNING] Segment {i} is clipping an inflated voxel!")
+                        print(f"     Obstacle at {obs} is only {dist_to_line:.3f}m from the line.")
+                        path_is_safe = False
+                        
+        if path_is_safe:
+            print("  -> [PASS] Mathematical path completely clears all inflated voxel centers.")
+        print("------------------------------------------------------\n")
 
         # 3. Build the NEW StandaloneWaypointsSFC object
         waypoints_smooth = StandaloneWaypointsSFC(numDimensions=FLOATING_PARAM.numDimensions)
@@ -169,7 +215,7 @@ class FrontEndSFC:
         print(f"[Front-End] Extracted {len(corridors)} Safe Flight Corridors via A*.")
 
         # 5. Calculate Control Point Allocation (Dynamic Kinematic & Local Support)
-        num_pts_list = self.allocate_dynamic_control_points(
+        exclusive_pts_list, int_pts_list = self.allocate_dynamic_control_points(
             corridors=corridors,
             degree=self.degree,
             v_max=3.0,       
@@ -177,17 +223,8 @@ class FrontEndSFC:
             pts_per_sec=1.0  
         )
 
-        # 6. Extract the A and b constraint matrices for the OSQP solver
-        sfc_constraints = []
-        for sfc in corridors:
-            A_mat, b_vec = sfc.getAbMatrices()
-            sfc_constraints.append({
-                'A': A_mat, 
-                'b': b_vec
-            })
-
         self.last_corridors = corridors
-        return sfc_constraints, num_pts_list, waypoints_smooth, None
+        return corridors, exclusive_pts_list, int_pts_list, waypoints_smooth, None
     
 
     def get_corridors(self, start_pos, end_pos, num_points_per_unit=FLIGHT.numPoints_perUnit):
@@ -242,99 +279,141 @@ class FrontEndSFC:
     
 
     def allocate_dynamic_control_points(self, corridors, degree, v_max=3.0, a_max=2.0, pts_per_sec=1.0):
-        """
-        Apex-Centric Dynamic Allocation Manager.
-        Treats intersections as independent geometric entities.
-        """
         num_corridors = len(corridors)
-        num_pts_list = [0] * num_corridors
         
-        # ==========================================
+        # 1. Cleanly separate the lists!
+        exclusive_pts_list = [0] * num_corridors
+        int_pts_list = [degree] * max(0, num_corridors - 1)
+        
         # PASS 1: The Straightaway Baseline
-        # ==========================================
         for i in range(num_corridors):
             L = getattr(corridors[i], 'length', 1.0)
-            
-            # Pure straight-line kinematics
-            t_cruise = L / v_max
-            t_accel = 2.0 * np.sqrt(L / a_max)
-            t_target = max(t_cruise, t_accel)
-            
-            # Assign baseline points
+            t_target = max(L / v_max, 2.0 * np.sqrt(L / a_max))
             N_kinematic = int(np.ceil(t_target * pts_per_sec))
             
-            # Enforce the mathematical Local Support Floor
-            num_pts_list[i] = max(N_kinematic, 2 * degree)
+            # The straightaway gets its own points independently
+            exclusive_pts_list[i] = max(N_kinematic, degree)
 
-        # ==========================================
         # PASS 2: The Apex Injector (The 3rd Entity)
-        # ==========================================
-        # We loop through the joints BETWEEN the corridors
         for i in range(num_corridors - 1):
             sfc_in = corridors[i]
             sfc_out = corridors[i+1]
             
-            # Grab the 3 intersection waypoints
-            p0 = np.ravel(sfc_in.primaryPosition)
-            p1 = np.ravel(sfc_in.secondaryPosition) # The Apex
-            p2 = np.ravel(sfc_out.secondaryPosition)
+            v_in = np.ravel(sfc_in.secondaryPosition) - np.ravel(sfc_in.primaryPosition)
+            v_out = np.ravel(sfc_out.secondaryPosition) - np.ravel(sfc_out.primaryPosition)
             
-            v_in = p1 - p0
-            v_out = p2 - p1
-            
-            norm_in = np.linalg.norm(v_in)
-            norm_out = np.linalg.norm(v_out)
+            norm_in, norm_out = np.linalg.norm(v_in), np.linalg.norm(v_out)
             
             if norm_in > 0.001 and norm_out > 0.001:
-                # Calculate the turn angle
-                cos_theta = np.dot(v_in, v_out) / (norm_in * norm_out)
-                cos_theta = np.clip(cos_theta, -1.0, 1.0)
-                
-                # The momentum shedding factor (0 for straight, 1.0 for 90-deg)
+                cos_theta = np.clip(np.dot(v_in, v_out) / (norm_in * norm_out), -1.0, 1.0)
                 momentum_shed_factor = 1.0 - cos_theta
                 
-                # If it's a real turn (e.g., more than a ~25 degree bend)
                 if momentum_shed_factor > 0.1: 
-                    # 1. Create the Apex Pool
-                    # A 90-deg turn creates a pool of exactly deg*3 (start of turn,curve,end of turn) extra control points
-                    apex_pool_size = int(np.ceil(momentum_shed_factor * (self.degree*3)))
+                    apex_pool_size = int(np.ceil(momentum_shed_factor * (degree * 3)))
                     
-                    # 2. Split the pool in half
-                    half_pool = apex_pool_size // 2
+                    # THE FIX: Inject the flexibility DIRECTLY into the intersection overlap!
+                    int_pts_list[i] += apex_pool_size
+
+        return exclusive_pts_list, int_pts_list
+    
+
+    def compile_system_constraints(self, corridors, exclusive_pts_list, int_pts_list):
+        import numpy as np
+        A_ineq_list, b_ineq_list = [], []
+        num_dimensions = 3
+        num_corridors = len(corridors)
+        
+        # Total points is just the clean sum of the two arrays
+        total_num_points = sum(exclusive_pts_list) + sum(int_pts_list)
+        global_cp_index = 0
+        
+        for i in range(num_corridors):
+            A_curr, b_curr = corridors[i].getAbMatrices()
+            b_curr = b_curr.flatten()
+            num_ineq_curr = A_curr.shape[0]
+            
+            # 1. Add EXCLUSIVE points for the straightaway
+            pts_exclusive = exclusive_pts_list[i]
+            for _ in range(pts_exclusive):
+                A_padded = np.zeros((num_ineq_curr, total_num_points * num_dimensions))
+                col_start = global_cp_index * num_dimensions
+                A_padded[:, col_start:col_start + num_dimensions] = A_curr
+                A_ineq_list.append(A_padded)
+                b_ineq_list.append(b_curr)
+                global_cp_index += 1
+                
+            # 2. Add INTERSECTION points
+            if i < num_corridors - 1:
+                A_next, b_next = corridors[i+1].getAbMatrices()
+                b_next = b_next.flatten()
+                
+                A_int = np.vstack((A_curr, A_next))
+                b_int = np.concatenate((b_curr, b_next))
+                num_ineq_int = A_int.shape[0]
+                
+                # Retrieve the dynamically sized overlap pool!
+                current_int_pts = int_pts_list[i]
+                for _ in range(current_int_pts):
+                    A_padded = np.zeros((num_ineq_int, total_num_points * num_dimensions))
+                    col_start = global_cp_index * num_dimensions
+                    A_padded[:, col_start:col_start + num_dimensions] = A_int
+                    A_ineq_list.append(A_padded)
+                    b_ineq_list.append(b_int)
+                    global_cp_index += 1
                     
-                    # 3. Inject the shared load!
-                    # SFC A gets extra points at its tail to brake
-                    num_pts_list[i] += half_pool
-                    # SFC B gets extra points at its nose to accelerate out
-                    num_pts_list[i+1] += half_pool
-
-        return num_pts_list
+        A_sfc_total = np.vstack(A_ineq_list)
+        b_sfc_total = np.concatenate(b_ineq_list)
+        
+        return A_sfc_total, b_sfc_total, total_num_points
 
 
-    def visualize(self, x_meters, y_meters, z_meters, style):
-        if style == 'continuous':
-            plotter_noWaypoints = PlotMapPath(
-            map=self.worldMap,
-            controlPoints_not_smooth_list=None,
-            )
+    def visualize_debugging(self, waypoints_smooth=None):
+        """
+        Plots the continuous map, inflated discrete voxels, and the smoothed A* path.
+        Fully renders the 3D grid to expose clipping anomalies.
+        """
+        print("[Debug] Launching Map Visualization...")
+        
+        fig = plt.figure(figsize=(10, 8))
+        ax = fig.add_subplot(111, projection="3d")
 
-            plotter_noWaypoints.plot(
-                x_limits=FLOATING_PARAM.x_limits,
-                y_limits=FLOATING_PARAM.y_limits,
-                z_limits=FLOATING_PARAM.z_limits,
-                aspectRatio=FLOATING_PARAM.aspect_ratio,
-            )
-        elif style == 'discrete':
-            # 1. Create the base figure (the window)
-            fig = plt.figure()
-            # 2. Add a 3D axis to the figure. This generates the 'ax' object!
-            ax = fig.add_subplot(111, projection='3d')
-            ax.scatter(x_meters, y_meters, z_meters, color='red', marker='s')
-            ax.set_xlabel('X (meters)')
-            ax.set_ylabel('Y (meters)')
-            ax.set_zlabel('Z (Altitude)')
-        else:
-            return
+        # 1. Draw the Full Inflated Voxel Aura (Red)
+        occupied_inflated = self.discrete_grid.occupied_voxels_inflated
+        if len(occupied_inflated) > 0:
+            ix, iy, iz = zip(*occupied_inflated)
+            
+            ix_m = np.array(ix) * self.voxel_resolution
+            iy_m = np.array(iy) * self.voxel_resolution
+            iz_m = np.array(iz) * self.voxel_resolution
+            
+            # Render the entire map with low opacity to see the path inside
+            ax.scatter(ix_m, iy_m, iz_m, 
+                       color='red', marker='s', s=20, alpha=0.10, label='Inflated Voxel Buffer')
 
-        # 4. Render the window! (The code will pause here until you close the plot)
-        plt.show()
+        # 2. Plot the Continuous Smoothed A* Path (Blue Line)
+        if waypoints_smooth is not None:
+            path_coords = waypoints_smooth.getAllPositions()
+            if len(path_coords) > 0:
+                px = [pos[0,0] for pos in path_coords]
+                py = [pos[1,0] for pos in path_coords]
+                pz = [pos[2,0] for pos in path_coords]
+                
+                # Plot the line on top of the voxels
+                ax.plot(px, py, pz, color='blue', linewidth=3, zorder=10, label='Smoothed A* Line')
+                
+                # Plot the physical corner nodes to see exactly where the smoother anchors
+                ax.scatter(px, py, pz, color='cyan', s=60, zorder=11, edgecolors='black', label='A* Anchor Nodes')
+            
+        # 3. Format and Render
+        ax.set_xlim(FLOATING_PARAM.x_limits[0], FLOATING_PARAM.x_limits[1])
+        ax.set_ylim(FLOATING_PARAM.y_limits[0], FLOATING_PARAM.y_limits[1])
+        ax.set_zlim(FLOATING_PARAM.z_limits[0], FLOATING_PARAM.z_limits[1])
+        ax.set_box_aspect(FLOATING_PARAM.aspect_ratio)
+        
+        ax.set_xlabel('X (meters)')
+        ax.set_ylabel('Y (meters)')
+        ax.set_zlabel('Z (Altitude)')
+        ax.legend()
+        
+        # Block=True pauses the python script so you can rotate and inspect the clipping
+        plt.show(block=True)

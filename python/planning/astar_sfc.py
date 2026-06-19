@@ -175,7 +175,8 @@ class AStar_SFC_Planner:
             if dist == 0:
                 return True
                 
-            steps = int(np.ceil(dist * 2))
+            # Upgraded step resolution: 5 steps per voxel prevents skipping diagonals
+            steps = int(np.ceil(dist * 5))
             for i in range(1, steps):
                 t = i / steps
                 point = p0 + t * (p1 - p0)

@@ -81,76 +81,78 @@ class SpatialScannerKD:
         In C++, this maps directly to an octree or PCL KD-Tree initialization.
         """
         points = np.array(list(raw_uninflated_obstacle_points))
-        # Build the tree once for the entire map
         self.kd_tree = KDTree(points) if len(points) > 0 else None
 
     def get_broad_phase_obstacles(self, pA, pB, W, ext_start, ext_end):
         """
-        Drops W-spaced spheres along the vector and returns a deduplicated list 
-        of all obstacles caught within the 3D Pythagorean radius.
+        A Vectorized Discrete Cylinder Search.
+        Executes a single O(log N) KD-Tree query, followed by an O(1) vectorized NumPy filter 
+        to perfectly isolate discrete LiDAR points within the flight corridor.
         """
         if self.kd_tree is None:
             return []
 
         pA = np.ravel(pA)
         pB = np.ravel(pB)
-        dist = np.linalg.norm(pB - pA)
+        v = pB - pA
+        dist = np.linalg.norm(v)
         
-        # Calculate the unit directional vector
-        if dist == 0:
-            ux = np.array([1.0, 0.0, 0.0])
-        else:
-            ux = (pB - pA) / dist
+        # Calculate unit directional vector
+        u = v / dist if dist > 0 else np.array([1.0, 0.0, 0.0])
 
         # ----------------------------------------------------
-        # THE GEOMETRIC CONSTANTS
+        # 1. DEFINE THE MATHEMATICAL CYLINDER
         # ----------------------------------------------------
-        spacing = W
-        # The 3D Pythagorean Fix to guarantee zero blind spots
-        r_search = W * (np.sqrt(3.0) / 2.0) 
-
-        sample_points = []
-
-        # 1. Backward Extension Sampling
-        # Start at pA, walk backwards
-        backward_dist = 0.0
-        while backward_dist <= ext_start:
-            sample_points.append(pA - (ux * backward_dist))
-            backward_dist += spacing
-
-        # 2. Main Segment Sampling
-        # Start at pA, walk forwards to pB
-        segment_dist = 0.0
-        while segment_dist <= dist:
-            sample_points.append(pA + (ux * segment_dist))
-            segment_dist += spacing
-            
-        # Guarantee the exact end node is sampled
-        sample_points.append(pB)
-
-        # 3. Forward Extension Sampling
-        # Start at pB, walk forwards
-        forward_dist = spacing 
-        while forward_dist <= ext_end:
-            sample_points.append(pB + (ux * forward_dist))
-            forward_dist += spacing
+        # Calculate the true start and end points including the runway extensions
+        p_start = pA - (u * ext_start)
+        p_end = pB + (u * ext_end)
+        total_len = dist + ext_start + ext_end
 
         # ----------------------------------------------------
-        # THE KD-TREE QUERY
+        # 2. THE BROAD-PHASE KD-TREE QUERY
         # ----------------------------------------------------
-        obs_points_set = set()
+        # Calculate the exact midpoint of the extended segment
+        midpoint = p_start + (p_end - p_start) / 2.0
         
-        for pt in sample_points:
-            # We use query_ball_point instead of k=100. 
-            # This guarantees we fetch ALL obstacles in the radius, 
-            # completely eliminating the risk of missing a dense cluster of trees.
-            idxs = self.kd_tree.query_ball_point(pt, r=r_search)
-            for idx in idxs:
-                # Add to a set as a tuple to automatically remove duplicates
-                obs_points_set.add(tuple(self.kd_tree.data[idx]))
-                
-        # Convert the deduplicated tuples back into numpy arrays for Layer 2
-        return [np.array(pt) for pt in obs_points_set]
+        # The bounding sphere radius must fully enclose the cylinder
+        search_radius = np.sqrt((total_len / 2.0)**2 + W**2)
+
+        # Execute exactly ONE query against the LiDAR map
+        candidate_idxs = self.kd_tree.query_ball_point(midpoint, r=search_radius)
+        if not candidate_idxs:
+            return []
+
+        candidates = self.kd_tree.data[candidate_idxs]
+
+        # ----------------------------------------------------
+        # 3. VECTORIZED DISCRETE FILTER (The Narrow Phase)
+        # ----------------------------------------------------
+        # Vector from the start of the cylinder to every candidate point
+        vecs_to_candidates = candidates - p_start
+        
+        # Project all points onto the unit vector 'u' via dot product
+        # This gives us the distance along the length of the cylinder
+        t_vals = np.dot(vecs_to_candidates, u)
+        
+        # Mask 1: Keep only points that fall within the physical length of the cylinder
+        mask_length = (t_vals >= 0) & (t_vals <= total_len)
+        
+        valid_candidates = candidates[mask_length]
+        valid_t = t_vals[mask_length]
+        
+        if len(valid_candidates) == 0:
+            return []
+
+        # Calculate the exact perpendicular distance to the flight line
+        # proj_points = p_start + (t * u)
+        proj_points = p_start + valid_t[:, np.newaxis] * u
+        perp_dists = np.linalg.norm(valid_candidates - proj_points, axis=1)
+        
+        # Mask 2: Keep only points that penetrate the lateral width 'W'
+        mask_radius = perp_dists <= W
+        
+        # Return the pure, filtered numpy array of discrete obstacles
+        return valid_candidates[mask_radius]
     
 
 import numpy as np
