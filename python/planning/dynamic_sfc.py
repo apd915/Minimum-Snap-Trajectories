@@ -116,6 +116,7 @@ class SpatialScannerKD:
         
         # The bounding sphere radius must fully enclose the cylinder
         search_radius = np.sqrt((total_len / 2.0)**2 + W**2)
+        # search_radius = np.sqrt((total_len / 2.0)**2 + (W/2)**2 + (W/2)**2)
 
         # Execute exactly ONE query against the LiDAR map
         candidate_idxs = self.kd_tree.query_ball_point(midpoint, r=search_radius)
@@ -162,88 +163,74 @@ class AsymmetricBoxBuilder:
         """
         Initializes the math engine with the physical constraints of the drone.
         """
-        self.r = drone_physical_radius + (voxel_resolution / 2.0)
+        self.drone_radius = drone_physical_radius
+        self.voxel_resolution = voxel_resolution
         self.max_drift = max_cp_drift
 
     def build_bounds(self, pA, pB, obs_points, ext_start, ext_end):
         """
-        Calculates local axes and shrinks the maximum asymmetric boundaries.
-        Returns: ux, uy, uz, bounds_array
+        Calculates local axes and uses Radial Surface Detection to 
+        optimally shrink asymmetric boundaries without crushing perpendicular axes.
         """
         pA = np.ravel(pA)
         pB = np.ravel(pB)
         dist = np.linalg.norm(pB - pA)
 
-        # ----------------------------------------------------
-        # 1. ESTABLISH LOCAL COORDINATE FRAME
-        # ----------------------------------------------------
         ux = (pB - pA) / dist if dist > 0 else np.array([1.0, 0.0, 0.0])
-        
         global_up = np.array([0.0, 0.0, 1.0])
-        # Gimbal lock protection: if flying straight up/down, swap the reference vector
-        if np.abs(np.dot(ux, global_up)) > 0.99:
-            global_up = np.array([1.0, 0.0, 0.0])
+        if np.abs(np.dot(ux, global_up)) > 0.99: global_up = np.array([1.0, 0.0, 0.0])
             
         uy = np.cross(global_up, ux)
-        uy = uy / np.linalg.norm(uy) # Normalize lateral vector
-        uz = np.cross(ux, uy)        # Vertical vector is orthogonal to both
+        uy = uy / np.linalg.norm(uy) 
+        uz = np.cross(ux, uy)        
 
-        # ----------------------------------------------------
-        # 2. INITIALIZE MAXIMUM BOUNDS 
-        # Array format: [ +X, -X, +Y, -Y, +Z, -Z ]
-        # ----------------------------------------------------
         bounds = np.array([
-            dist + ext_end,   # +X (Forward Runway)
-            ext_start,        # -X (Backward Runway)
-            self.max_drift,   # +Y (Left Wall)
-            self.max_drift,   # -Y (Right Wall)
-            self.max_drift,   # +Z (Ceiling)
-            self.max_drift    # -Z (Floor)
+            dist + ext_end, ext_start,        
+            self.max_drift, self.max_drift,   
+            self.max_drift, self.max_drift    
         ])
 
-        # ----------------------------------------------------
-        # 3. NARROW-PHASE PROJECTION & SMART SHRINK
-        # ----------------------------------------------------
+        # --- THE FIX: Exact OBB-AABB Projection (Separating Axis Theorem) ---
+        # Calculates exactly how far the voxel's sharp corners stick out towards each specific SFC wall.
+        half_res = self.voxel_resolution / 2.0
+        r_x = self.drone_radius + half_res * (abs(ux[0]) + abs(ux[1]) + abs(ux[2]))
+        r_y = self.drone_radius + half_res * (abs(uy[0]) + abs(uy[1]) + abs(uy[2]))
+        r_z = self.drone_radius + half_res * (abs(uz[0]) + abs(uz[1]) + abs(uz[2]))
+
+        projected_points = []
         for obs in obs_points:
             v = obs - pA
-            
-            # Project global coordinate onto local axes via Dot Product
             proj_x = np.dot(v, ux)
             proj_y = np.dot(v, uy)
             proj_z = np.dot(v, uz)
             
-            # Fast-fail: Is the obstacle totally outside our maximum possible length?
-            if not (-(bounds[1] + self.r) <= proj_x <= (bounds[0] + self.r)):
-                continue 
+            # Use dynamic r_x to fail fast!
+            if -(bounds[1] + r_x) <= proj_x <= (bounds[0] + r_x):
+                r_dist = np.sqrt(proj_y**2 + proj_z**2)
+                projected_points.append((r_dist, proj_x, proj_y, proj_z))
+                
+        projected_points.sort(key=lambda x: x[0])
 
-            # Check if obstacle is inside the current Y/Z cross-section 
-            in_y_slice = -(bounds[3] + self.r) <= proj_y <= (bounds[2] + self.r)
-            in_z_slice = -(bounds[5] + self.r) <= proj_z <= (bounds[4] + self.r)
+        for r_dist, proj_x, proj_y, proj_z in projected_points:
+            eps = 1e-4
+            # Use dynamic r_y and r_z to test active slices
+            in_y_slice = -(bounds[3] + r_y) + eps < proj_y < (bounds[2] + r_y) - eps
+            in_z_slice = -(bounds[5] + r_z) + eps < proj_z < (bounds[4] + r_z) - eps
+            
+            if not (in_y_slice and in_z_slice): continue 
                 
-            # SCENARIO A: Obstacle is adjacent to the main A* segment
             if 0 <= proj_x <= dist:
-                # Shrink Lateral Walls (Y) if obstacle is within vertical slice
-                if in_z_slice: 
-                    if proj_y > 0:
-                        bounds[2] = min(bounds[2], max(0.1, proj_y - self.r)) 
-                    elif proj_y < 0:
-                        bounds[3] = min(bounds[3], max(0.1, abs(proj_y) - self.r)) 
-                
-                # Shrink Vertical Walls (Z) if obstacle is within lateral slice
-                if in_y_slice: 
-                    if proj_z > 0:
-                        bounds[4] = min(bounds[4], max(0.1, proj_z - self.r)) 
-                    elif proj_z < 0:
-                        bounds[5] = min(bounds[5], max(0.1, abs(proj_z) - self.r)) 
-                        
-            # SCENARIO B: Obstacle is in the start/end Extensions
+                # Use dynamic r_y and r_z to shrink bounds safely!
+                if abs(proj_y) >= abs(proj_z):
+                    if proj_y >= 0: bounds[2] = min(bounds[2], max(0.0, proj_y - r_y)) 
+                    else:           bounds[3] = min(bounds[3], max(0.0, abs(proj_y) - r_y)) 
+                else:
+                    if proj_z >= 0: bounds[4] = min(bounds[4], max(0.0, proj_z - r_z)) 
+                    else:           bounds[5] = min(bounds[5], max(0.0, abs(proj_z) - r_z)) 
             else:
-                # Only truncate X-axis length if it is directly inside the tunnel
-                if in_y_slice and in_z_slice:
-                    if proj_x > dist: # Obstacle is ahead
-                        bounds[0] = min(bounds[0], max(dist + 0.1, proj_x - self.r))
-                    elif proj_x < 0:  # Obstacle is behind
-                        bounds[1] = min(bounds[1], max(0.1, abs(proj_x) - self.r))
+                # Use dynamic r_x to shrink endcaps safely!
+                if proj_x > dist:  bounds[0] = min(bounds[0], max(dist + 0.0, proj_x - r_x))
+                elif proj_x < 0:   bounds[1] = min(bounds[1], max(0.0, abs(proj_x) - r_x))
 
         return ux, uy, uz, bounds
     
@@ -276,10 +263,10 @@ class OBBAdapters:
         """
         pA = np.ravel(pA)
         
-        # Expand the bounds back out to their physical dimensions for plotting
-        xmax, xmin = bounds[0] + drone_radius, -(bounds[1] + drone_radius)
-        ymax, ymin = bounds[2] + drone_radius, -(bounds[3] + drone_radius)
-        zmax, zmin = bounds[4] + drone_radius, -(bounds[5] + drone_radius)
+        # --- THE FIX: Remove drone_radius to plot true Center of Mass boundaries! ---
+        xmax, xmin = bounds[0], -bounds[1]
+        ymax, ymin = bounds[2], -bounds[3]
+        zmax, zmin = bounds[4], -bounds[5]
         
         # Hardcoded combinations to match Matplotlib's expected face indexing
         x_vals = [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin]
@@ -329,10 +316,10 @@ class MsgAsymmetricOBB:
         """
         pA = self.primaryPosition.flatten()
         
-        # Add the physical drone radius back so the plotted boxes represent the actual safe flight space
-        xmax, xmin = self.bounds[0] + self.r, -(self.bounds[1] + self.r)
-        ymax, ymin = self.bounds[2] + self.r, -(self.bounds[3] + self.r)
-        zmax, zmin = self.bounds[4] + self.r, -(self.bounds[5] + self.r)
+        # --- THE FIX: Remove self.r to plot true Center of Mass boundaries! ---
+        xmax, xmin = self.bounds[0], -self.bounds[1]
+        ymax, ymin = self.bounds[2], -self.bounds[3]
+        zmax, zmin = self.bounds[4], -self.bounds[5]
         
         x_vals = [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin]
         y_vals = [ymin, ymin, ymax, ymax, ymin, ymin, ymax, ymax]

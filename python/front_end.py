@@ -78,25 +78,27 @@ class FrontEndSFC:
         )
         # ---------------------------------------------------------
 
+        # --- THE FIX: Add half-resolution to shift from Voxel Corners to Voxel Centers! ---
         # --- THE FIX: Pass INFLATED discrete voxel indices back to continuous meters for the KD-Tree! ---
         # This perfectly aligns the continuous math engine with the discrete A* pathfinder.
         self.inflated_obstacle_meters = [
-            np.array(idx) * self.voxel_resolution 
+            np.array(idx) * self.voxel_resolution + (self.voxel_resolution / 2.0)
             for idx in self.discrete_grid.occupied_voxels_inflated
         ]
         
-        raw_obstacle_meters = [
-            np.array(idx) * self.voxel_resolution 
+        self.raw_obstacle_meters = [
+            np.array(idx) * self.voxel_resolution + (self.voxel_resolution / 2.0)
             for idx in self.discrete_grid.occupied_voxels_raw
         ]
         
         # Define the physical constraints perfectly matching sfc_width
         max_cp_drift = (self.sfc_width / 2.0) - self.drone_physical_radius
         
-        # Initialize the Manager with RAW points
+        # We pass the INFLATED points, and tell the builder the drone radius is 0.0 
+        # (since the inflation already contains the drone!).
         self.sfc_manager = AsymmetricSFCManager(
-            raw_uninflated_obstacle_points=raw_obstacle_meters, 
-            drone_physical_radius=self.drone_physical_radius,  
+            raw_uninflated_obstacle_points=self.inflated_obstacle_meters, 
+            drone_physical_radius=0.0,  
             max_cp_drift=max_cp_drift,
             voxel_resolution=self.voxel_resolution
         )
@@ -107,7 +109,11 @@ class FrontEndSFC:
 
         self.bounds = [(0,FLOATING_PARAM.northEnd), (0,FLOATING_PARAM.eastEnd), (0,FLOATING_PARAM.downEnd)]
 
-        self.path_gen_astar = AStar_SFC_Planner(self.discrete_grid, self.bounds)
+        self.path_gen_astar = AStar_SFC_Planner(
+            voxel_grid=self.discrete_grid, 
+            bounds=self.bounds, 
+            drone_radius=self.drone_physical_radius
+        )
 
 
 
@@ -122,55 +128,117 @@ class FrontEndSFC:
         self.path_gen_astar.search(start_discretized, goal_discretized)
         astar_path_indices = self.path_gen_astar.sfc_smoother()
         
+        # Extract the saved raw indices
+        raw_astar_indices = getattr(self.path_gen_astar, 'raw_path', [])
+
         elapsed_ms = (time.perf_counter() - t_start) * 1000.0
         print(f"[Front-End] A* Search & Smoothing Completed in {elapsed_ms:.2f} ms")
 
         if not astar_path_indices:
             print("[Error] A* failed to find a path.")
-            return None, None, None, None
+            return None, None, None, None, None
 
-        # 2. Convert discrete grid indices back to continuous 3x1 column vectors
+        # 2. Convert BOTH discrete paths back to continuous meters (using Voxel Centers!)
         continuous_path = []
         for idx in astar_path_indices:
-            # .reshape(3, 1) is CRITICAL to match your existing matrix math!
-            pos_meters = (np.array(idx) * self.voxel_resolution).reshape(3, 1)
+            pos_meters = (np.array(idx) * self.voxel_resolution + (self.voxel_resolution / 2.0)).reshape(3, 1)
             continuous_path.append(pos_meters)
+            
+        waypoints_not_smooth = StandaloneWaypointsSFC(numDimensions=FLOATING_PARAM.numDimensions)
+        for idx in raw_astar_indices:
+            pos_meters = (np.array(idx) * self.voxel_resolution + (self.voxel_resolution / 2.0)).reshape(3, 1)
+            waypoints_not_smooth.add(position=pos_meters, parent=np.inf, cost=0.0, connectsToGoal=False)
+
+        # 2.5 Anchor the exact continuous Start and Goal positions!
+        if len(continuous_path) >= 2:
+            continuous_path[0] = start_pos.reshape(3, 1)
+            continuous_path[-1] = end_pos.reshape(3, 1)
+            
+            waypoints_not_smooth.positions[0] = start_pos.reshape(3, 1)
+            waypoints_not_smooth.positions[-1] = end_pos.reshape(3, 1)
 
 
         # --- MATHEMATICAL CLIPPING DIAGNOSTIC ---
-        print("\n[Diagnostic] Checking A* Path against Inflated KD-Tree...")
-        path_is_safe = True
-        for i in range(1, len(continuous_path)):
-            pA = continuous_path[i-1].flatten()
-            pB = continuous_path[i].flatten()
+        def run_clipping_diagnostic(path_points, path_name):
+            print(f"\n[Diagnostic] Checking {path_name} against RAW KD-Tree Reality...")
+            path_is_safe = True
             
-            # Calculate segment length and direction
-            v = pB - pA
-            seg_len = np.linalg.norm(v)
-            if seg_len == 0: continue
-            u = v / seg_len
+            # 0.5m Drone + 0.25m Voxel Volume
+            safety_threshold = 0.75 
             
-            # Check every inflated obstacle against the segment
-            for obs in self.inflated_obstacle_meters:
-                # 1. Project obstacle onto the line segment (dot product)
-                t = np.dot(obs - pA, u)
+            for i in range(1, len(path_points)):
+                pA = path_points[i-1].flatten()
+                pB = path_points[i].flatten()
                 
-                # 2. Only care about obstacles directly adjacent to the segment
-                if 0 <= t <= seg_len:
-                    # 3. Calculate perpendicular distance from segment to obstacle
-                    proj_point = pA + t * u
-                    dist_to_line = np.linalg.norm(obs - proj_point)
-                    
-                    # If the distance is exactly 0, the line goes directly through the voxel center
-                    # If the distance is < the voxel resolution, it's clipping the physical block!
-                    if dist_to_line < self.voxel_resolution:
-                        print(f"  -> [WARNING] Segment {i} is clipping an inflated voxel!")
-                        print(f"     Obstacle at {obs} is only {dist_to_line:.3f}m from the line.")
-                        path_is_safe = False
+                v = pB - pA
+                seg_len = np.linalg.norm(v)
+                if seg_len == 0: continue
+                u = v / seg_len
+                
+                for obs in self.raw_obstacle_meters: 
+                    t = np.dot(obs - pA, u)
+                    if 0 <= t <= seg_len:
+                        proj_point = pA + t * u
+                        dist_to_line = np.linalg.norm(obs - proj_point)
                         
-        if path_is_safe:
-            print("  -> [PASS] Mathematical path completely clears all inflated voxel centers.")
-        print("------------------------------------------------------\n")
+                        if dist_to_line < safety_threshold:
+                            print(f"  -> [WARNING] {path_name} Segment {i} is clipping!")
+                            print(f"     Obstacle at {np.round(obs, 2)} is only {dist_to_line:.3f}m from the line.")
+                            path_is_safe = False
+                            
+            if path_is_safe:
+                print(f"  -> [PASS] {path_name} perfectly clears all physical bounds.")
+            print("-" * 55)
+
+        # raw_path_points = [pos for pos in waypoints_not_smooth.positions]
+        # run_clipping_diagnostic(raw_path_points, "Raw A* Path")
+        # run_clipping_diagnostic(continuous_path, "Smoothed A* Path")
+
+        # --- SFC VOLUME VS INFLATED OBSTACLE DIAGNOSTIC ---
+        def run_sfc_volume_diagnostic(corridors):
+            print("\n[Diagnostic] Checking SFC Volumes against INFLATED Obstacles...")
+            all_safe = True
+            
+            for i, sfc in enumerate(corridors):
+                pA = sfc.primaryPosition.flatten()
+                ux, uy, uz = sfc.ux, sfc.uy, sfc.uz
+                b = sfc.bounds
+                
+                max_x, min_x = b[0], -b[1]
+                max_y, min_y = b[2], -b[3]
+                max_z, min_z = b[4], -b[5]
+                
+                # --- THE FIX: Volume Expansion ---
+                # Expand the SFC check to cover the physical projection of the voxel!
+                half_res = self.voxel_resolution / 2.0
+                r_x = half_res * (abs(ux[0]) + abs(ux[1]) + abs(ux[2]))
+                r_y = half_res * (abs(uy[0]) + abs(uy[1]) + abs(uy[2]))
+                r_z = half_res * (abs(uz[0]) + abs(uz[1]) + abs(uz[2]))
+
+                collisions = 0
+                for obs in self.inflated_obstacle_meters:
+                    v = obs - pA
+                    px = np.dot(v, ux)
+                    py = np.dot(v, uy)
+                    pz = np.dot(v, uz)
+                    
+                    eps = 1e-3 
+                    
+                    # If the distance to the center is within the bounds + the voxel projection, it overlaps!
+                    if (min_x - r_x + eps <= px <= max_x + r_x - eps) and \
+                       (min_y - r_y + eps <= py <= max_y + r_y - eps) and \
+                       (min_z - r_z + eps <= pz <= max_z + r_z - eps):
+                        
+                        print(f"  -> [FATAL] SFC {i} mathematically OVERLAPS an INFLATED obstacle at {np.round(obs, 2)}!")
+                        collisions += 1
+                        all_safe = False
+                        
+                if collisions > 0:
+                    print(f"     [Result] SFC {i} FAILED ({collisions} volume overlaps).")
+                    
+            if all_safe:
+                print("  -> [PASS] All SFCs perfectly avoid inflated voxel volumes!")
+            print("-" * 55)
 
         # 3. Build the NEW StandaloneWaypointsSFC object
         waypoints_smooth = StandaloneWaypointsSFC(numDimensions=FLOATING_PARAM.numDimensions)
@@ -214,6 +282,9 @@ class FrontEndSFC:
         corridors = waypoints_smooth.getAllFlightCorridors()
         print(f"[Front-End] Extracted {len(corridors)} Safe Flight Corridors via A*.")
 
+        # --- TRIGGER THE NEW DIAGNOSTIC ---
+        run_sfc_volume_diagnostic(corridors)
+
         # 5. Calculate Control Point Allocation (Dynamic Kinematic & Local Support)
         exclusive_pts_list, int_pts_list = self.allocate_dynamic_control_points(
             corridors=corridors,
@@ -224,7 +295,7 @@ class FrontEndSFC:
         )
 
         self.last_corridors = corridors
-        return corridors, exclusive_pts_list, int_pts_list, waypoints_smooth, None
+        return corridors, exclusive_pts_list, int_pts_list, waypoints_smooth, waypoints_not_smooth
     
 
     def get_corridors(self, start_pos, end_pos, num_points_per_unit=FLIGHT.numPoints_perUnit):
@@ -367,53 +438,74 @@ class FrontEndSFC:
         return A_sfc_total, b_sfc_total, total_num_points
 
 
-    def visualize_debugging(self, waypoints_smooth=None):
+    def visualize_debugging(self, waypoints_smooth=None, waypoints_not_smooth=None, corridors=None):
         """
-        Plots the continuous map, inflated discrete voxels, and the smoothed A* path.
-        Fully renders the 3D grid to expose clipping anomalies.
+        Master Diagnostic Plotter (High Performance):
+        - Actual Simulation Objects (via native PlotMapPath)
+        - Gray Dashed Line: Raw Unsmoothed A* Path
+        - Blue Solid Line: Smoothed A* Path
+        - Green Wireframes: SFC Bounding Boxes
         """
-        print("[Debug] Launching Map Visualization...")
-        
-        fig = plt.figure(figsize=(10, 8))
-        ax = fig.add_subplot(111, projection="3d")
+        import matplotlib.pyplot as plt
+        from rrt_mavsim.viewers.plot_map_path import PlotMapPath
+        import rrt_mavsim.parameters.floatingBlocks_parameters as FLOATING_PARAM
 
-        # 1. Draw the Full Inflated Voxel Aura (Red)
-        occupied_inflated = self.discrete_grid.occupied_voxels_inflated
-        if len(occupied_inflated) > 0:
-            ix, iy, iz = zip(*occupied_inflated)
-            
-            ix_m = np.array(ix) * self.voxel_resolution
-            iy_m = np.array(iy) * self.voxel_resolution
-            iz_m = np.array(iz) * self.voxel_resolution
-            
-            # Render the entire map with low opacity to see the path inside
-            ax.scatter(ix_m, iy_m, iz_m, 
-                       color='red', marker='s', s=20, alpha=0.10, label='Inflated Voxel Buffer')
+        print("[Debug] Launching Master Geometry Visualization with Actual Objects...")
+        
+        # 1. Use the optimized native renderer to draw the ACTUAL blocks
+        plotter = PlotMapPath(
+            map=self.worldMap,
+            waypoints_not_smooth=waypoints_not_smooth,
+            waypoints_smooth=None, # We draw paths manually below to customize colors
+            controlPoints_smooth_list=None
+        )
+        
+        # This builds the environment polygons and sets the physical limits, 
+        # but importantly, it leaves the figure open for us to draw on!
+        plotter.plot(
+            x_limits=FLOATING_PARAM.x_limits,
+            y_limits=FLOATING_PARAM.y_limits,
+            z_limits=FLOATING_PARAM.z_limits,
+            aspectRatio=FLOATING_PARAM.aspect_ratio,
+        )
+        
+        # Hijack the active 3D axis
+        # ax = plt.gca()
 
-        # 2. Plot the Continuous Smoothed A* Path (Blue Line)
-        if waypoints_smooth is not None:
-            path_coords = waypoints_smooth.getAllPositions()
-            if len(path_coords) > 0:
-                px = [pos[0,0] for pos in path_coords]
-                py = [pos[1,0] for pos in path_coords]
-                pz = [pos[2,0] for pos in path_coords]
-                
-                # Plot the line on top of the voxels
-                ax.plot(px, py, pz, color='blue', linewidth=3, zorder=10, label='Smoothed A* Line')
-                
-                # Plot the physical corner nodes to see exactly where the smoother anchors
-                ax.scatter(px, py, pz, color='cyan', s=60, zorder=11, edgecolors='black', label='A* Anchor Nodes')
-            
-        # 3. Format and Render
-        ax.set_xlim(FLOATING_PARAM.x_limits[0], FLOATING_PARAM.x_limits[1])
-        ax.set_ylim(FLOATING_PARAM.y_limits[0], FLOATING_PARAM.y_limits[1])
-        ax.set_zlim(FLOATING_PARAM.z_limits[0], FLOATING_PARAM.z_limits[1])
-        ax.set_box_aspect(FLOATING_PARAM.aspect_ratio)
-        
-        ax.set_xlabel('X (meters)')
-        ax.set_ylabel('Y (meters)')
-        ax.set_zlabel('Z (Altitude)')
-        ax.legend()
-        
-        # Block=True pauses the python script so you can rotate and inspect the clipping
+        # # 2. Plot the Raw Unsmoothed A* Path (Gray Dashed)
+        # if waypoints_not_smooth is not None:
+        #     raw_coords = waypoints_not_smooth.getAllPositions()
+        #     if len(raw_coords) > 0:
+        #         rx = [pos[0,0] for pos in raw_coords]
+        #         ry = [pos[1,0] for pos in raw_coords]
+        #         rz = [pos[2,0] for pos in raw_coords]
+        #         ax.plot(rx, ry, rz, color='gray', linestyle='--', linewidth=2, zorder=8, label='Raw A* Path')
+        #         ax.scatter(rx, ry, rz, color='gray', s=10, zorder=9)
+
+        # # 3. Plot the Continuous Smoothed A* Path (Blue Line)
+        # if waypoints_smooth is not None:
+        #     path_coords = waypoints_smooth.getAllPositions()
+        #     if len(path_coords) > 0:
+        #         px = [pos[0,0] for pos in path_coords]
+        #         py = [pos[1,0] for pos in path_coords]
+        #         pz = [pos[2,0] for pos in path_coords]
+        #         ax.plot(px, py, pz, color='blue', linewidth=3, zorder=10, label='Smoothed A* Segment')
+        #         ax.scatter(px, py, pz, color='cyan', s=60, zorder=11, edgecolors='black', label='A* Anchor Nodes')
+
+        # 4. Plot the Safe Flight Corridors (Green Wireframes)
+        # if corridors is not None:
+        #     edges = [
+        #         (0, 1), (1, 2), (2, 3), (3, 0), # Bottom face
+        #         (4, 5), (5, 6), (6, 7), (7, 4), # Top face
+        #         (0, 4), (1, 5), (2, 6), (3, 7)  # Vertical pillars
+        #     ]
+        #     for idx, sfc in enumerate(corridors):
+        #         vertices = sfc.getAllVertices_3D() 
+        #         for edge in edges:
+        #             p1, p2 = vertices[:, edge[0]], vertices[:, edge[1]]
+        #             # Draw continuous green lines connecting the corners of the SFC
+        #             ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]], 
+        #                     color='lime', linewidth=1.5, alpha=0.8, zorder=12)
+
+        # ax.legend()
         plt.show(block=True)

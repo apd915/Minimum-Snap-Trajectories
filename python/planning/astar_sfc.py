@@ -6,8 +6,9 @@ import heapq
 import math
 
 class AStar_SFC_Planner:
-    def __init__(self, voxel_grid, bounds):
+    def __init__(self, voxel_grid, bounds, drone_radius):
         self.voxel_grid = voxel_grid
+        self.drone_radius = drone_radius
         res = self.voxel_grid.voxel_resolution
 
         # 1. Convert the entire list to an array, divide it all at once, and cast to integers!
@@ -112,6 +113,9 @@ class AStar_SFC_Planner:
         return self.path
     
     def sfc_smoother(self):
+        # Save the raw path before we overwrite it!
+        self.raw_path = self.path.copy() if hasattr(self, 'path') else []
+
         # If the path is only 2 points (Start and Goal), it's already a straight line!
         if not hasattr(self, 'path') or len(self.path) <= 2:
             return self.path 
@@ -137,37 +141,13 @@ class AStar_SFC_Planner:
     
     def is_line_of_sight_clear(self, idx_a, idx_b):
         """
-        Checks for clear line of sight. Prioritizes perfect continuous math if available,
-        falls back to discrete voxel raycasting for LiDAR point clouds.
+        Conservative Discrete Raycaster.
+        Checks ALL voxels that the mathematical line touches (using floor/ceil)
+        to completely eliminate diagonal corner clipping in the voxel grid.
         """
         import numpy as np
         
-        # --- 1. CONTINUOUS FRONT-END (Perfect Math) ---
-        # If the simulation provided perfect bounding boxes, we absolutely want to use them!
-        if hasattr(self.voxel_grid, 'continuous_inflated_bounds') and len(self.voxel_grid.continuous_inflated_bounds) > 0:
-            res = self.voxel_grid.voxel_resolution
-            p0 = np.array(idx_a) * res
-            p1 = np.array(idx_b) * res
-            d = p1 - p0
-            
-            with np.errstate(divide='ignore'):
-                inv_d = 1.0 / d
-                
-            for b_min, b_max in self.voxel_grid.continuous_inflated_bounds:
-                t1 = (b_min - p0) * inv_d
-                t2 = (b_max - p0) * inv_d
-                t_min = np.minimum(t1, t2)
-                t_max = np.maximum(t1, t2)
-                t_enter = np.max(t_min)
-                t_exit = np.min(t_max)
-                
-                if t_enter <= t_exit and t_exit >= 0 and t_enter <= 1.0:
-                    return False
-            return True
-
-        # --- 2. DISCRETE LIDAR (Voxel Raycasting) ---
-        # If we are flying in a raw LiDAR map, we must use the discrete raycast.
-        elif hasattr(self.voxel_grid, 'occupied_voxels_inflated'):
+        if hasattr(self.voxel_grid, 'occupied_voxels_inflated'):
             p0 = np.array(idx_a)
             p1 = np.array(idx_b)
             dist = np.linalg.norm(p1 - p0)
@@ -175,19 +155,26 @@ class AStar_SFC_Planner:
             if dist == 0:
                 return True
                 
-            # Upgraded step resolution: 5 steps per voxel prevents skipping diagonals
+            # High step resolution ensures we don't jump over thin diagonal walls
             steps = int(np.ceil(dist * 5))
             for i in range(1, steps):
                 t = i / steps
                 point = p0 + t * (p1 - p0)
-                voxel = tuple(np.round(point).astype(int))
                 
-                if voxel in self.voxel_grid.occupied_voxels_inflated:
-                    return False
+                # --- THE DISCRETE FIX: The 8-Voxel Bounding Box ---
+                # Take the floor and ceil to get every single voxel this fractional point touches!
+                x_vals = {int(np.floor(point[0])), int(np.ceil(point[0]))}
+                y_vals = {int(np.floor(point[1])), int(np.ceil(point[1]))}
+                z_vals = {int(np.floor(point[2])), int(np.ceil(point[2]))}
+                
+                # Check all touched voxels (up to 8 permutations for a 3D corner)
+                for vx in x_vals:
+                    for vy in y_vals:
+                        for vz in z_vals:
+                            if (vx, vy, vz) in self.voxel_grid.occupied_voxels_inflated:
+                                return False
             return True
-            
-        else:
-            return True
+        return True
     
     def get_safe_extension_length(self, idx_a, idx_b, requested_extension):
         """

@@ -101,12 +101,9 @@ class TrajectoryPlanner:
         print_sfc_diagnostics(corridors)
         # -------------------------------------
 
-        # # [Visual Check] - Render the map, the inflated voxels, and the path!
-        # self.front_end.visualize_debugging(waypoints_smooth)
-
-        # [Visual Check] - Uncomment to pause and view SFCs before solving
-        # print("[Visual Check] Displaying SFCs. Close the plot window to begin optimization...")
-        # self.visualize(waypoints_smooth, waypoints_not_smooth)
+        print("\n[Visual Check] Displaying Complete Geometry (Raw Path, Smoothed Path, SFCs)...")
+        print("Close the Matplotlib window to begin OSQP optimization!")
+        self.visualize(waypoints_smooth, waypoints_not_smooth)
 
         # =========================================================
         # PHASE 2 & 3 & 4: The Optimization and Stretching Loop
