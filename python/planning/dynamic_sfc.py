@@ -169,8 +169,8 @@ class AsymmetricBoxBuilder:
 
     def build_bounds(self, pA, pB, obs_points, ext_start, ext_end):
         """
-        Calculates local axes and uses Radial Surface Detection to 
-        optimally shrink asymmetric boundaries without crushing perpendicular axes.
+        Calculates local axes and uses True Segment Distance Sorting and 
+        the Separating Axis Theorem (SAT) to shrink all 6 planes flawlessly.
         """
         pA = np.ravel(pA)
         pB = np.ravel(pB)
@@ -190,8 +190,7 @@ class AsymmetricBoxBuilder:
             self.max_drift, self.max_drift    
         ])
 
-        # --- THE FIX: Exact OBB-AABB Projection (Separating Axis Theorem) ---
-        # Calculates exactly how far the voxel's sharp corners stick out towards each specific SFC wall.
+        # Exact OBB-AABB Projection (SAT)
         half_res = self.voxel_resolution / 2.0
         r_x = self.drone_radius + half_res * (abs(ux[0]) + abs(ux[1]) + abs(ux[2]))
         r_y = self.drone_radius + half_res * (abs(uy[0]) + abs(uy[1]) + abs(uy[2]))
@@ -204,23 +203,30 @@ class AsymmetricBoxBuilder:
             proj_y = np.dot(v, uy)
             proj_z = np.dot(v, uz)
             
-            # Use dynamic r_x to fail fast!
             if -(bounds[1] + r_x) <= proj_x <= (bounds[0] + r_x):
-                r_dist = np.sqrt(proj_y**2 + proj_z**2)
-                projected_points.append((r_dist, proj_x, proj_y, proj_z))
+                # --- THE FIX: True Segment Distance Sorting ---
+                # Accurately sorts points in the end-caps to prevent blindspots!
+                if proj_x < 0:
+                    seg_dist = np.sqrt(proj_x**2 + proj_y**2 + proj_z**2)
+                elif proj_x > dist:
+                    seg_dist = np.sqrt((proj_x - dist)**2 + proj_y**2 + proj_z**2)
+                else:
+                    seg_dist = np.sqrt(proj_y**2 + proj_z**2)
+                projected_points.append((seg_dist, proj_x, proj_y, proj_z))
                 
         projected_points.sort(key=lambda x: x[0])
 
         for r_dist, proj_x, proj_y, proj_z in projected_points:
             eps = 1e-4
-            # Use dynamic r_y and r_z to test active slices
+            # 6-Plane active slice check
+            in_x_slice = -(bounds[1] + r_x) + eps < proj_x < (bounds[0] + r_x) - eps
             in_y_slice = -(bounds[3] + r_y) + eps < proj_y < (bounds[2] + r_y) - eps
             in_z_slice = -(bounds[5] + r_z) + eps < proj_z < (bounds[4] + r_z) - eps
             
-            if not (in_y_slice and in_z_slice): continue 
+            if not (in_x_slice and in_y_slice and in_z_slice): continue 
                 
             if 0 <= proj_x <= dist:
-                # Use dynamic r_y and r_z to shrink bounds safely!
+                # Inside main tunnel. X CANNOT be shrunk. Must choose Y or Z.
                 if abs(proj_y) >= abs(proj_z):
                     if proj_y >= 0: bounds[2] = min(bounds[2], max(0.0, proj_y - r_y)) 
                     else:           bounds[3] = min(bounds[3], max(0.0, abs(proj_y) - r_y)) 
@@ -228,9 +234,19 @@ class AsymmetricBoxBuilder:
                     if proj_z >= 0: bounds[4] = min(bounds[4], max(0.0, proj_z - r_z)) 
                     else:           bounds[5] = min(bounds[5], max(0.0, abs(proj_z) - r_z)) 
             else:
-                # Use dynamic r_x to shrink endcaps safely!
-                if proj_x > dist:  bounds[0] = min(bounds[0], max(dist + 0.0, proj_x - r_x))
-                elif proj_x < 0:   bounds[1] = min(bounds[1], max(0.0, abs(proj_x) - r_x))
+                # --- THE FIX: 6-Plane Equality in the End-Caps! ---
+                # Finds the axis the obstacle is pushing hardest against and ONLY shrinks that plane.
+                dist_x = abs(proj_x) if proj_x < 0 else abs(proj_x - dist)
+                
+                if dist_x >= abs(proj_y) and dist_x >= abs(proj_z):
+                    if proj_x > dist: bounds[0] = min(bounds[0], max(dist + 0.0, proj_x - r_x))
+                    elif proj_x < 0:  bounds[1] = min(bounds[1], max(0.0, abs(proj_x) - r_x))
+                elif abs(proj_y) >= abs(proj_z):
+                    if proj_y >= 0: bounds[2] = min(bounds[2], max(0.0, proj_y - r_y)) 
+                    else:           bounds[3] = min(bounds[3], max(0.0, abs(proj_y) - r_y)) 
+                else:
+                    if proj_z >= 0: bounds[4] = min(bounds[4], max(0.0, proj_z - r_z)) 
+                    else:           bounds[5] = min(bounds[5], max(0.0, abs(proj_z) - r_z)) 
 
         return ux, uy, uz, bounds
     
