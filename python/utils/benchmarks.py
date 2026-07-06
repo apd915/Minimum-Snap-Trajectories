@@ -343,13 +343,13 @@ def run_benchmark_suite(num_trials=100):
         # 1. Generate the random environment (Using the helper from earlier)
         random_obstacles = generate_random_city()
 
-        spline_type="natural"
+        spline_type="clamped"
 
-        sfc_height = 1.
-        sfc_width = 1.
+        sfc_height = 5.
+        sfc_width = 5.
 
-        sfc_start_ext = 5.
-        sfc_end_ext = 5.
+        sfc_start_ext = 2.
+        sfc_end_ext = 2.
         
         # 2. Setup your Planner dynamically
         from trajectory_planner import TrajectoryPlanner
@@ -362,7 +362,28 @@ def run_benchmark_suite(num_trials=100):
         planner.front_end.discrete_grid.continuous_inflated_bounds.clear()
         planner.front_end.discrete_grid.populate_from_continuous(
             obstacles=random_obstacles, 
-            inflation_radius=planner.front_end.inflation_radius
+            inflation_radius=planner.front_end.grid_inflation_radius # <-- FIXED TYPO
+        )
+
+        # --- THE SYNCHRONIZATION FIX ---
+        # Update the raw points and rebuild the KD-Tree so the Box Builder can "see" the new random map
+        res = planner.front_end.voxel_resolution
+        planner.front_end.inflated_obstacle_meters = [
+            np.array(idx) * res + (res / 2.0)
+            for idx in planner.front_end.discrete_grid.occupied_voxels_inflated
+        ]
+        planner.front_end.raw_obstacle_meters = [
+            np.array(idx) * res + (res / 2.0)
+            for idx in planner.front_end.discrete_grid.occupied_voxels_raw
+        ]
+        
+        from planning.dynamic_sfc import AsymmetricSFCManager
+        max_cp_drift = (planner.front_end.sfc_width / 2.0) - planner.front_end.drone_physical_radius
+        planner.front_end.sfc_manager = AsymmetricSFCManager(
+            raw_uninflated_obstacle_points=planner.front_end.inflated_obstacle_meters, 
+            drone_physical_radius=0.0,  
+            max_cp_drift=max_cp_drift,
+            voxel_resolution=res
         )
 
         trial_data = {
@@ -390,6 +411,33 @@ def run_benchmark_suite(num_trials=100):
             trial_data["failure_reason"] = f"Crash/No Path: {str(e)}"
              
         results.append(trial_data)
+
+        # --- VISUALIZE EVERY ITERATION FOR DEBUGGING ---
+        print(f"\n[Visual Check] Rendering Trial {i+1} Environment & SFCs...")
+        
+        knots = None
+        if control_points is not None:
+            # Dynamically import the correct evaluator if optimization succeeded
+            if planner.spline_type == "natural":
+                from min_snap_natural import MinSnapEvalNatural as SplineEvaluator
+            else:
+                from min_snap_clamped import MinSnapEvalClamped as SplineEvaluator
+
+            knots = SplineEvaluator(
+                num_segments=len(control_points[0]) - planner.degree, 
+                degree=planner.degree
+            ).knots
+            
+        # Safely fetch the corridors (returns empty list if A* crashed completely)
+        corridors_to_plot = getattr(planner.front_end, 'last_corridors', [])
+        
+        # visualize_random_city(
+        #     obstacles=random_obstacles, 
+        #     control_points=control_points, 
+        #     degree=planner.degree, 
+        #     knots=knots,
+        #     safeFlightCorridors_list=corridors_to_plot
+        # )
         
     # 4. Export the Data
     df = pd.DataFrame(results)

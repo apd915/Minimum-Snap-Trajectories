@@ -122,7 +122,7 @@ class FrontEndSFC:
         start_discretized = tuple(int(x) for x in np.ravel(start_pos) // self.voxel_resolution)
         goal_discretized = tuple(int(x) for x in np.ravel(end_pos) // self.voxel_resolution)
 
-        print(f"[Front-End] Starting A* Search from {start_discretized} to {goal_discretized}...")
+        print(f"[Front-End] Starting A* Search from {start_pos} to {end_pos} continuous, {start_discretized} to {goal_discretized} discretized...")
         t_start = time.perf_counter()
         
         self.path_gen_astar.search(start_discretized, goal_discretized)
@@ -157,281 +157,130 @@ class FrontEndSFC:
             waypoints_not_smooth.positions[0] = start_pos.reshape(3, 1)
             waypoints_not_smooth.positions[-1] = end_pos.reshape(3, 1)
 
-
-        # --- MATHEMATICAL CLIPPING DIAGNOSTIC ---
-        def run_clipping_diagnostic(path_points, path_name):
-            print(f"\n[Diagnostic] Checking {path_name} against RAW KD-Tree Reality...")
-            path_is_safe = True
-            
-            # 0.5m Drone + 0.25m Voxel Volume
-            safety_threshold = 0.75 
-            
-            for i in range(1, len(path_points)):
-                pA = path_points[i-1].flatten()
-                pB = path_points[i].flatten()
-                
-                v = pB - pA
-                seg_len = np.linalg.norm(v)
-                if seg_len == 0: continue
-                u = v / seg_len
-                
-                for obs in self.raw_obstacle_meters: 
-                    t = np.dot(obs - pA, u)
-                    if 0 <= t <= seg_len:
-                        proj_point = pA + t * u
-                        dist_to_line = np.linalg.norm(obs - proj_point)
-                        
-                        if dist_to_line < safety_threshold:
-                            print(f"  -> [WARNING] {path_name} Segment {i} is clipping!")
-                            print(f"     Obstacle at {np.round(obs, 2)} is only {dist_to_line:.3f}m from the line.")
-                            path_is_safe = False
-                            
-            if path_is_safe:
-                print(f"  -> [PASS] {path_name} perfectly clears all physical bounds.")
-            print("-" * 55)
-
         # raw_path_points = [pos for pos in waypoints_not_smooth.positions]
         # run_clipping_diagnostic(raw_path_points, "Raw A* Path")
         # run_clipping_diagnostic(continuous_path, "Smoothed A* Path")
 
-        # --- SFC VOLUME VS INFLATED OBSTACLE DIAGNOSTIC ---
-        def run_sfc_volume_diagnostic(corridors):
-            print("\n[Diagnostic] Checking SFC Volumes against INFLATED Obstacles...")
-            all_safe = True
-            
-            for i, sfc in enumerate(corridors):
-                pA = sfc.primaryPosition.flatten()
-                ux, uy, uz = sfc.ux, sfc.uy, sfc.uz
-                b = sfc.bounds
-                
-                max_x, min_x = b[0], -b[1]
-                max_y, min_y = b[2], -b[3]
-                max_z, min_z = b[4], -b[5]
-                
-                # --- THE FIX: Volume Expansion ---
-                # Expand the SFC check to cover the physical projection of the voxel!
-                half_res = self.voxel_resolution / 2.0
-                r_x = half_res * (abs(ux[0]) + abs(ux[1]) + abs(ux[2]))
-                r_y = half_res * (abs(uy[0]) + abs(uy[1]) + abs(uy[2]))
-                r_z = half_res * (abs(uz[0]) + abs(uz[1]) + abs(uz[2]))
-
-                collisions = 0
-                for obs in self.inflated_obstacle_meters:
-                    v = obs - pA
-                    px = np.dot(v, ux)
-                    py = np.dot(v, uy)
-                    pz = np.dot(v, uz)
-                    
-                    eps = 1e-3 
-                    
-                    # If the distance to the center is within the bounds + the voxel projection, it overlaps!
-                    if (min_x - r_x + eps <= px <= max_x + r_x - eps) and \
-                       (min_y - r_y + eps <= py <= max_y + r_y - eps) and \
-                       (min_z - r_z + eps <= pz <= max_z + r_z - eps):
-                        
-                        print(f"  -> [FATAL] SFC {i} mathematically OVERLAPS an INFLATED obstacle at {np.round(obs, 2)}!")
-                        collisions += 1
-                        all_safe = False
-                        
-                if collisions > 0:
-                    print(f"     [Result] SFC {i} FAILED ({collisions} volume overlaps).")
-                    
-            if all_safe:
-                print("  -> [PASS] All SFCs perfectly avoid inflated voxel volumes!")
-            print("-" * 55)
-
         # 3. Build the NEW StandaloneWaypointsSFC object
         waypoints_smooth = StandaloneWaypointsSFC(numDimensions=FLOATING_PARAM.numDimensions)
         
-        # Add the Start point
-        waypoints_smooth.add(
-            position=continuous_path[0], 
-            parent=np.inf, 
-            cost=0.0, 
-            connectsToGoal=False
-        )
+        waypoints_smooth.add(position=continuous_path[0], parent=np.inf, cost=0.0, connectsToGoal=False)
 
-        # 4. Generate the Safe Flight Corridors (SFCs) along the path
         for i in range(1, len(continuous_path)):
             prev_pos = continuous_path[i-1]
             curr_pos = continuous_path[i]
             
             is_goal = (i == len(continuous_path) - 1)
-            waypoints_smooth.add(
-                position=curr_pos, parent=i-1, cost=0.0, connectsToGoal=is_goal
-            )
+            waypoints_smooth.add(position=curr_pos, parent=i-1, cost=0.0, connectsToGoal=is_goal)
 
-            # Determine massive extensions only if natural splines are used
             ext_start = self.sfc_start_ext
             ext_end = self.sfc_end_ext
             if self.spline_type == 'natural':
                 if i == 1: ext_start = 30.0
                 if is_goal: ext_end = 30.0
             
-            # The Manager runs Layer 1, 2, and 3, and returns the finished duck-typed object!
             sfc = self.sfc_manager.generate_sfc(
-                pA=prev_pos, 
-                pB=curr_pos, 
-                W=self.sfc_width, 
-                ext_start=ext_start, 
-                ext_end=ext_end
+                pA=prev_pos, pB=curr_pos, W=self.sfc_width, ext_start=ext_start, ext_end=ext_end
             )
-            
             waypoints_smooth.addSFC(sfc)
             
         corridors = waypoints_smooth.getAllFlightCorridors()
         print(f"[Front-End] Extracted {len(corridors)} Safe Flight Corridors via A*.")
 
-        # --- TRIGGER THE NEW DIAGNOSTIC ---
-        run_sfc_volume_diagnostic(corridors)
+        # run_sfc_volume_diagnostic(corridors)
 
-        # 5. Calculate Control Point Allocation (Dynamic Kinematic & Local Support)
-        exclusive_pts_list, int_pts_list = self.allocate_dynamic_control_points(
-            corridors=corridors,
-            degree=self.degree,
-            v_max=3.0,       
-            a_max=2.0,       
-            pts_per_sec=1.0  
+        # --- THE FIX: Generate the Unified Constraint Pools ---
+        constraint_pools = self.allocate_dynamic_control_points(
+            corridors=corridors, degree=self.degree, v_max=3.0, a_max=2.0, pts_per_sec=1.0  
         )
 
         self.last_corridors = corridors
-        return corridors, exclusive_pts_list, int_pts_list, waypoints_smooth, waypoints_not_smooth
-    
+        
+        # Return the pools instead of the split lists!
+        return corridors, constraint_pools, waypoints_smooth, waypoints_not_smooth
 
-    def get_corridors(self, start_pos, end_pos, num_points_per_unit=FLIGHT.numPoints_perUnit):
-        """
-        Runs the RRT search and extracts the raw math for the Back-End.
-        
-        Returns:
-            sfc_constraints: List of dicts [{'A': A_mat, 'b': b_vec}, ...]
-            num_pts_list: List of integers denoting how many points belong in each box
-        """
-        print("[Front-End] Running RRT Path Search...")
-        start_time = time.time()
-        
-        # 1. Run the mathematical search
-        self.path_gen.generateSFCPaths(
-            startPosition_3D=start_pos,
-            endPosition_3D=end_pos,
-            worldMap=self.worldMap,
-            segmentLength=FLIGHT.segmentLength,
-        )
-        
-        print(f"[Front-End] Path found in {time.time() - start_time:.3f} seconds.")
-        
-        # 2. Extract the smooth waypoints and the corridor objects
-        waypoints_not_smooth = self.path_gen.getWaypointsNotSmooth()
-        waypoints_smooth = self.path_gen.getWaypointsSmooth()
-        corridors = waypoints_smooth.getAllFlightCorridors()
-        
-        if not corridors:
-            return None, None
-            
-        print(f"[Front-End] Extracted {len(corridors)} Safe Flight Corridors.")
-        
-        # 3. Calculate the Control Point Allocation
-        # We use Dean's exact tool to calculate how many points each box gets 
-        # based on the box's physical length.
-        num_pts_list = getNumCntPts_list(
-            waypoints=waypoints_smooth, 
-            numPointsPerUnit=num_points_per_unit
-        )
-        
-        # 4. Extract the A and b constraint matrices
-        sfc_constraints = []
-        for sfc in corridors:
-            A_mat, b_vec = sfc.getAbMatrices()
-            sfc_constraints.append({
-                'A': A_mat, 
-                'b': b_vec
-            })
-            
-        return sfc_constraints, num_pts_list, waypoints_smooth, waypoints_not_smooth
-    
 
     def allocate_dynamic_control_points(self, corridors, degree, v_max=3.0, a_max=2.0, pts_per_sec=1.0):
+        """
+        Sequential Pairwise Allocator.
+        Guarantees geometric volume by ONLY ever intersecting two adjacent SFCs.
+        Automatically 'shaves down' tiny SFCs to 0 exclusive points to prevent bunching.
+        """
         num_corridors = len(corridors)
-        
-        # 1. Cleanly separate the lists!
-        exclusive_pts_list = [0] * num_corridors
-        int_pts_list = [degree] * max(0, num_corridors - 1)
-        
-        # PASS 1: The Straightaway Baseline
+        constraint_pools = []
+
         for i in range(num_corridors):
-            L = getattr(corridors[i], 'length', 1.0)
-            t_target = max(L / v_max, 2.0 * np.sqrt(L / a_max))
-            N_kinematic = int(np.ceil(t_target * pts_per_sec))
-            
-            # The straightaway gets its own points independently
-            exclusive_pts_list[i] = max(N_kinematic, degree)
+            sfc = corridors[i]
+            L_base = sfc.getDistancePrimaryToSecondary()
 
-        # PASS 2: The Apex Injector (The 3rd Entity)
-        for i in range(num_corridors - 1):
-            sfc_in = corridors[i]
-            sfc_out = corridors[i+1]
-            
-            v_in = np.ravel(sfc_in.secondaryPosition) - np.ravel(sfc_in.primaryPosition)
-            v_out = np.ravel(sfc_out.secondaryPosition) - np.ravel(sfc_out.primaryPosition)
-            
-            norm_in, norm_out = np.linalg.norm(v_in), np.linalg.norm(v_out)
-            
-            if norm_in > 0.001 and norm_out > 0.001:
-                cos_theta = np.clip(np.dot(v_in, v_out) / (norm_in * norm_out), -1.0, 1.0)
-                momentum_shed_factor = 1.0 - cos_theta
+            # 1. EXCLUSIVE POOL (The Main Body)
+            # Determine true physical overlap from neighbors
+            actual_ext_prev = corridors[i-1].bounds[0] - corridors[i-1].getDistancePrimaryToSecondary() if i > 0 else 0.0
+            actual_ext_next = corridors[i+1].bounds[1] if i < num_corridors - 1 else 0.0
+
+            # Subsumption Heuristic: Is this SFC a tiny joint, or a travel hallway?
+            if L_base <= (actual_ext_prev + actual_ext_next):
+                exclusive_pts = 0 # Subsumed by bridges! Shave down to 0 to prevent bunching.
+            else:
+                t_target = max(L_base / v_max, 2.0 * np.sqrt(L_base / a_max))
+                N_kinematic = int(np.ceil(t_target * pts_per_sec))
                 
-                if momentum_shed_factor > 0.1: 
-                    apex_pool_size = int(np.ceil(momentum_shed_factor * (degree * 3)))
-                    
-                    # THE FIX: Inject the flexibility DIRECTLY into the intersection overlap!
-                    int_pts_list[i] += apex_pool_size
+                # --- THE FIX: Remove the 'degree' minimum! ---
+                # Allow tiny 1m or 2m travel corridors to have just 1 or 2 points.
+                # Enforcing max(degree, ...) was cramming 4 points into 1m gaps!
+                exclusive_pts = N_kinematic
 
-        return exclusive_pts_list, int_pts_list
+            # Edge case: If there is literally only 1 SFC in the whole map
+            if num_corridors == 1:
+                exclusive_pts = max(exclusive_pts, degree * 2)
+
+            if exclusive_pts > 0:
+                constraint_pools.append({'pts': exclusive_pts, 'sfcs': [i], 'type': 'exclusive'})
+
+            # 2. BRIDGE POOL (The Intersection to the Next Box)
+            if i < num_corridors - 1:
+                # Pairwise intersection GUARANTEES 3D geometric volume!
+                # No 3-way null-sets!
+                constraint_pools.append({'pts': degree, 'sfcs': [i, i+1], 'type': 'bridge'})
+
+        return constraint_pools
     
 
-    def compile_system_constraints(self, corridors, exclusive_pts_list, int_pts_list):
+    def compile_system_constraints(self, corridors, constraint_pools):
         import numpy as np
         A_ineq_list, b_ineq_list = [], []
         num_dimensions = 3
-        num_corridors = len(corridors)
         
-        # Total points is just the clean sum of the two arrays
-        total_num_points = sum(exclusive_pts_list) + sum(int_pts_list)
+        # Total points is the clean sum of all pools
+        total_num_points = sum(pool['pts'] for pool in constraint_pools)
         global_cp_index = 0
         
-        for i in range(num_corridors):
-            A_curr, b_curr = corridors[i].getAbMatrices()
-            b_curr = b_curr.flatten()
-            num_ineq_curr = A_curr.shape[0]
+        for pool in constraint_pools:
+            pts = pool['pts']
+            sfc_indices = pool['sfcs']
             
-            # 1. Add EXCLUSIVE points for the straightaway
-            pts_exclusive = exclusive_pts_list[i]
-            for _ in range(pts_exclusive):
-                A_padded = np.zeros((num_ineq_curr, total_num_points * num_dimensions))
+            # 1. Mathematically overlap all SFC matrices in this pool (The N-way Intersection)
+            A_combined_list = []
+            b_combined_list = []
+            for sfc_idx in sfc_indices:
+                A_curr, b_curr = corridors[sfc_idx].getAbMatrices()
+                A_combined_list.append(A_curr)
+                b_combined_list.append(b_curr.flatten())
+                
+            A_pool = np.vstack(A_combined_list)
+            b_pool = np.concatenate(b_combined_list)
+            num_ineq_pool = A_pool.shape[0]
+            
+            # 2. Lock the control points strictly inside this overlapping volume!
+            for _ in range(pts):
+                A_padded = np.zeros((num_ineq_pool, total_num_points * num_dimensions))
                 col_start = global_cp_index * num_dimensions
-                A_padded[:, col_start:col_start + num_dimensions] = A_curr
+                A_padded[:, col_start:col_start + num_dimensions] = A_pool
+                
                 A_ineq_list.append(A_padded)
-                b_ineq_list.append(b_curr)
+                b_ineq_list.append(b_pool)
                 global_cp_index += 1
                 
-            # 2. Add INTERSECTION points
-            if i < num_corridors - 1:
-                A_next, b_next = corridors[i+1].getAbMatrices()
-                b_next = b_next.flatten()
-                
-                A_int = np.vstack((A_curr, A_next))
-                b_int = np.concatenate((b_curr, b_next))
-                num_ineq_int = A_int.shape[0]
-                
-                # Retrieve the dynamically sized overlap pool!
-                current_int_pts = int_pts_list[i]
-                for _ in range(current_int_pts):
-                    A_padded = np.zeros((num_ineq_int, total_num_points * num_dimensions))
-                    col_start = global_cp_index * num_dimensions
-                    A_padded[:, col_start:col_start + num_dimensions] = A_int
-                    A_ineq_list.append(A_padded)
-                    b_ineq_list.append(b_int)
-                    global_cp_index += 1
-                    
         A_sfc_total = np.vstack(A_ineq_list)
         b_sfc_total = np.concatenate(b_ineq_list)
         
@@ -509,3 +358,83 @@ class FrontEndSFC:
 
         # ax.legend()
         plt.show(block=True)
+
+
+# --- SFC VOLUME VS INFLATED OBSTACLE DIAGNOSTIC ---
+        def run_sfc_volume_diagnostic(corridors):
+            print("\n[Diagnostic] Checking SFC Volumes against INFLATED Obstacles...")
+            all_safe = True
+            
+            for i, sfc in enumerate(corridors):
+                pA = sfc.primaryPosition.flatten()
+                ux, uy, uz = sfc.ux, sfc.uy, sfc.uz
+                b = sfc.bounds
+                
+                max_x, min_x = b[0], -b[1]
+                max_y, min_y = b[2], -b[3]
+                max_z, min_z = b[4], -b[5]
+                
+                # --- THE FIX: Volume Expansion ---
+                # Expand the SFC check to cover the physical projection of the voxel!
+                half_res = self.voxel_resolution / 2.0
+                r_x = half_res * (abs(ux[0]) + abs(ux[1]) + abs(ux[2]))
+                r_y = half_res * (abs(uy[0]) + abs(uy[1]) + abs(uy[2]))
+                r_z = half_res * (abs(uz[0]) + abs(uz[1]) + abs(uz[2]))
+
+                collisions = 0
+                for obs in self.inflated_obstacle_meters:
+                    v = obs - pA
+                    px = np.dot(v, ux)
+                    py = np.dot(v, uy)
+                    pz = np.dot(v, uz)
+                    
+                    eps = 1e-3 
+                    
+                    # If the distance to the center is within the bounds + the voxel projection, it overlaps!
+                    if (min_x - r_x + eps <= px <= max_x + r_x - eps) and \
+                       (min_y - r_y + eps <= py <= max_y + r_y - eps) and \
+                       (min_z - r_z + eps <= pz <= max_z + r_z - eps):
+                        
+                        print(f"  -> [FATAL] SFC {i} mathematically OVERLAPS an INFLATED obstacle at {np.round(obs, 2)}!")
+                        collisions += 1
+                        all_safe = False
+                        
+                if collisions > 0:
+                    print(f"     [Result] SFC {i} FAILED ({collisions} volume overlaps).")
+                    
+            if all_safe:
+                print("  -> [PASS] All SFCs perfectly avoid inflated voxel volumes!")
+            print("-" * 55)
+
+
+# --- MATHEMATICAL CLIPPING DIAGNOSTIC ---
+        def run_clipping_diagnostic(path_points, path_name):
+            print(f"\n[Diagnostic] Checking {path_name} against RAW KD-Tree Reality...")
+            path_is_safe = True
+            
+            # 0.5m Drone + 0.25m Voxel Volume
+            safety_threshold = 0.75 
+            
+            for i in range(1, len(path_points)):
+                pA = path_points[i-1].flatten()
+                pB = path_points[i].flatten()
+                
+                v = pB - pA
+                seg_len = np.linalg.norm(v)
+                if seg_len == 0: continue
+                u = v / seg_len
+                
+                for obs in self.raw_obstacle_meters: 
+                    t = np.dot(obs - pA, u)
+                    if 0 <= t <= seg_len:
+                        proj_point = pA + t * u
+                        dist_to_line = np.linalg.norm(obs - proj_point)
+                        
+                        if dist_to_line < safety_threshold:
+                            print(f"  -> [WARNING] {path_name} Segment {i} is clipping!")
+                            print(f"     Obstacle at {np.round(obs, 2)} is only {dist_to_line:.3f}m from the line.")
+                            path_is_safe = False
+                            
+            if path_is_safe:
+                print(f"  -> [PASS] {path_name} perfectly clears all physical bounds.")
+            print("-" * 55)

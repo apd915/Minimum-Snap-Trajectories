@@ -77,46 +77,33 @@ class TrajectoryPlanner:
 
 
     def plan_mission(self, start_pos, end_pos, start_vel=np.zeros(3), start_acc=np.zeros(3)):
-        """
-        The main orchestration loop with Dynamic Time Stretching.
-        """
         print("--- Starting Trajectory Planning Mission ---")
         mission_start_time = time.perf_counter()
 
-        # =========================================================
-        # PHASE 1: The Front-End 
-        # =========================================================
         print("[Phase 1] Generating Safe Flight Corridors...")
         
         sfc_start_time = time.perf_counter()
-        corridors, exclusive_pts_list, int_pts_list, waypoints_smooth, waypoints_not_smooth = self.front_end.get_corridors_astar(start_pos, end_pos)
+        # --- THE FIX: Unpack the Constraint Pools ---
+        corridors, constraint_pools, waypoints_smooth, waypoints_not_smooth = self.front_end.get_corridors_astar(start_pos, end_pos)
         sfc_duration = time.perf_counter() - sfc_start_time
-        
         
         if not corridors:
             print("[Error] No valid path found through the environment.")
             return None, None
         
-        # DIAGNOSTIC TOOL
-        print_sfc_diagnostics(corridors)
-        # -------------------------------------
+        # print_sfc_diagnostics(corridors)
 
-        print("\n[Visual Check] Displaying Complete Geometry (Raw Path, Smoothed Path, SFCs)...")
-        print("Close the Matplotlib window to begin OSQP optimization!")
-        self.visualize(waypoints_smooth, waypoints_not_smooth)
+        # print("\n[Visual Check] Displaying Complete Geometry (Raw Path, Smoothed Path, SFCs)...")
+        # print("Close the Matplotlib window to begin OSQP optimization!")
+        # self.visualize(waypoints_smooth, waypoints_not_smooth)
 
-        # =========================================================
-        # PHASE 2 & 3 & 4: The Optimization and Stretching Loop
-        # =========================================================
         max_stretches = 5
         stretch_count = 0
         optimal_control_points = None
         opt_duration = 0.0
 
-        # 1. Format initial states for the boundary matrices
         S = np.hstack((start_pos.reshape(3,1), start_vel.reshape(3,1), start_acc.reshape(3,1))) 
 
-        # 2. Route the Boundary Logic
         if self.spline_type == "natural":
             E_standard = np.hstack((end_pos.reshape(3,1), np.zeros((3,1)), np.zeros((3,1))))
             SE = np.hstack((S, E_standard))
@@ -126,43 +113,32 @@ class TrajectoryPlanner:
         else:
             raise ValueError(f"Unknown spline_type: {self.spline_type}")
         
-
         while stretch_count <= max_stretches:
             print(f"\n--- Optimization Attempt {stretch_count + 1} ---")
             
-            # 1. Ask the Front End to compile the matrices based on the CURRENT num_pts_list
-            A_sfc, b_sfc, total_control_points = self.front_end.compile_system_constraints(corridors, exclusive_pts_list, int_pts_list)
+            # --- THE FIX: Pass the unified pools to the matrix compiler ---
+            A_sfc, b_sfc, total_control_points = self.front_end.compile_system_constraints(corridors, constraint_pools)
             
-            # print(f"A_sfc:\n{A_sfc}\n")
-            # print(f"b_sfc:\n{b_sfc}\n")
             print(f"[Phase 2] Translating {len(corridors)} SFCs for {total_control_points} points...")
 
-            # 2. Initialize Backend Math
             opt_start_time = time.perf_counter()
             num_segments = total_control_points - self.degree
             
             if self.spline_type == "natural":
                 optimizer = MinSnapEvalNatural(num_segments=num_segments, degree=self.degree)
-
-                # Natural natively returns transposed blocks, so we MUST flip them for OSQP
                 D_vel = optimizer._get_fast_cascaded_D_matrix(num_segments, self.degree, 1).T
                 D_accel = optimizer._get_fast_cascaded_D_matrix(num_segments, self.degree, 2).T
                 SE_qp = SE
             else:
                 optimizer = MinSnapEvalClamped(num_segments=num_segments, degree=self.degree)
-
-                # Clamped natively returns the correct shape. DO NOT flip them!
                 D_vel = optimizer._get_fast_cascaded_D_matrix(num_segments, self.degree, 1)
                 D_accel = optimizer._get_fast_cascaded_D_matrix(num_segments, self.degree, 2)
-                
-                # Clamped requires mapping the boundary targets through B^{d,3}
                 B_d3 = optimizer._get_B_d3_matrix(self.degree)
                 SE_qp = SE @ B_d3
 
             W = optimizer.W
             A_eq = optimizer.B_combined.T
 
-            # 4. Run the QP Solver
             print(f"[Phase 3] Running OSQP Solver...")
             try:
                 optimal_control_points = run_qp_solver(
@@ -178,27 +154,25 @@ class TrajectoryPlanner:
                 opt_duration = time.perf_counter() - opt_start_time 
                 
                 print(f"[Phase 3] Optimization Successful in {opt_duration:.4f}s!")
-                break  # Exit the while loop!
+                break  
                 
             except Exception as e:
-                # =========================================================
-                # PHASE 4: Kinodynamic Check & Time Stretching
-                # =========================================================
                 print(f"[Phase 4] Solver failed (Kinematically impossible): {e}")
                 
                 if stretch_count < max_stretches:
                     print("[Phase 4] Stretching time allocation (+points to straights and intersections)...")
-                    # STRETCH BOTH POOLS!
-                    exclusive_pts_list = [pts + self.degree for pts in exclusive_pts_list]
-                    int_pts_list = [pts + 2 for pts in int_pts_list]
+                    # --- THE FIX: Stretch the Unified Pools ---
+                    for pool in constraint_pools:
+                        if pool['type'] == 'exclusive':
+                            pool['pts'] += self.degree
+                        else:
+                            pool['pts'] += 2
                 else:
                     print("[Error] Max stretching attempts reached.")
                 
                 stretch_count += 1
 
         total_time = time.perf_counter() - mission_start_time
-
-        # Calculate overhead (matrix formatting, RRT overhead, etc.)
         overhead_duration = total_time - (sfc_duration + opt_duration)
 
         print("\n" + "="*50)
@@ -211,7 +185,6 @@ class TrajectoryPlanner:
         print(f"TOTAL PLANNING TIME:          {total_time * 1000:.2f} ms")
         print("="*50 + "\n")
 
-        # --- NEW: Package the metrics for the benchmarking script ---
         metrics = {
             "astar_time_ms": sfc_duration * 1000.0,
             "osqp_time_ms": opt_duration * 1000.0,
