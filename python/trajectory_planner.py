@@ -57,7 +57,7 @@ def print_sfc_diagnostics(corridors):
     print("="*60 + "\n")
 
 class TrajectoryPlanner:
-    def __init__(self, map_config, map_bounds=(100.,100.,15.), v_max=3.0, a_max=2.0, degree=4, spline_type="natural", sfc_height=1., sfc_width=1., sfc_start_ext=5., sfc_end_ext=5.):
+    def __init__(self, map_config, map_bounds=(100.,100.,15.), v_max=3.0, a_max=2.0, degree=4, spline_type="natural", sfc_height=1., sfc_width=1., sfc_start_ext=5., sfc_end_ext=5., aircraft_type="multi-rotor"):
         """
         Initializes the master trajectory planner.
         """
@@ -71,9 +71,10 @@ class TrajectoryPlanner:
         self.sfc_start_ext = sfc_start_ext
         self.sfc_end_ext = sfc_end_ext
         self.map_bounds=map_bounds
+        self.aircraft_type = aircraft_type
         
         # Instantiate the Front-End
-        self.front_end = FrontEndSFC(self.sfc_height, self.sfc_width, self.sfc_start_ext, self.sfc_end_ext, self.spline_type, map_config, degree)
+        self.front_end = FrontEndSFC(self.sfc_height, self.sfc_width, self.sfc_start_ext, self.sfc_end_ext, self.spline_type, map_config, degree, self.aircraft_type)
 
 
     def plan_mission(self, start_pos, end_pos, start_vel=np.zeros(3), start_acc=np.zeros(3)):
@@ -165,8 +166,6 @@ class TrajectoryPlanner:
                     for pool in constraint_pools:
                         if pool['type'] == 'exclusive':
                             pool['pts'] += self.degree
-                        else:
-                            pool['pts'] += 2
                 else:
                     print("[Error] Max stretching attempts reached.")
                 
@@ -314,6 +313,13 @@ class TrajectoryPlanner:
             aspectRatio=FLOATING_PARAM.aspect_ratio,
         )
         
+        # --- NEW: Red Hue Visualization for Inflated C-Space ---
+        ax = plt.gca()
+        if hasattr(self.front_end, 'inflated_obstacle_meters') and len(self.front_end.inflated_obstacle_meters) > 0:
+            import numpy as np
+            inf_pts = np.array(self.front_end.inflated_obstacle_meters)
+            ax.scatter(inf_pts[:, 0], inf_pts[:, 1], inf_pts[:, 2], color='red', marker='s', s=100, alpha=0.15, label="Inflated Bounds")
+        
         # This will block the code from continuing until you close the window!
         plt.show()
 
@@ -339,8 +345,8 @@ if __name__ == "__main__":
 
     spline_type="clamped"
 
-    sfc_height = 10.
-    sfc_width = 10.
+    sfc_height = 5.
+    sfc_width = 5.
 
     sfc_start_ext = 5.
     sfc_end_ext = 5.
@@ -348,7 +354,7 @@ if __name__ == "__main__":
     planner = TrajectoryPlanner(map_config=mock_map, map_bounds=map_bounds, 
                                 spline_type=spline_type, sfc_height=sfc_height, 
                                 sfc_width=sfc_width, sfc_start_ext=sfc_start_ext, 
-                                sfc_end_ext=sfc_end_ext)
+                                sfc_end_ext=sfc_end_ext, aircraft_type="fixed-wing")
     controlPointsList, waypoints_smooth, _ = planner.plan_mission(start, goal)
 
 

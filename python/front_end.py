@@ -20,9 +20,10 @@ import rrt_mavsim.parameters.flightCorridor_parameters as FLIGHT
 from mapping.voxel_grid import SparseVoxelGrid
 from planning.astar_sfc import AStar_SFC_Planner
 from planning.dynamic_sfc import AsymmetricSFCManager, StandaloneWaypointsSFC
+from planning.static_sfc import StaticSFCManager
 
 class FrontEndSFC:
-    def __init__(self, sfc_height, sfc_width, sfc_start_ext, sfc_end_ext, spline_type="natural", map_type="FLOATING_BLOCKS", degree=4):
+    def __init__(self, sfc_height, sfc_width, sfc_start_ext, sfc_end_ext, spline_type="natural", map_type="FLOATING_BLOCKS", degree=4, aircraft_type="multi-rotor"):
         """
         Initializes the environment and the RRT planner.
         """
@@ -32,6 +33,7 @@ class FrontEndSFC:
         self.sfc_start_ext = sfc_start_ext
         self.sfc_end_ext = sfc_end_ext
         self.spline_type = spline_type
+        self.aircraft_type = aircraft_type
         
         # 1. Initialize the Map
         # Note: We are defaulting to floating blocks based on your test, 
@@ -102,6 +104,7 @@ class FrontEndSFC:
             max_cp_drift=max_cp_drift,
             voxel_resolution=self.voxel_resolution
         )
+        self.static_sfc_manager = StaticSFCManager(self.sfc_height, self.sfc_width)
 
         occupied_inflated = self.discrete_grid.occupied_voxels_inflated
         occupied_raw = self.discrete_grid.occupied_voxels_raw
@@ -179,9 +182,14 @@ class FrontEndSFC:
                 if i == 1: ext_start = 30.0
                 if is_goal: ext_end = 30.0
             
-            sfc = self.sfc_manager.generate_sfc(
-                pA=prev_pos, pB=curr_pos, W=self.sfc_width, ext_start=ext_start, ext_end=ext_end
-            )
+            if self.aircraft_type == "fixed-wing":
+                sfc = self.static_sfc_manager.generate_sfc(
+                    pA=prev_pos, pB=curr_pos, ext_start=ext_start, ext_end=ext_end
+                )
+            else:
+                sfc = self.sfc_manager.generate_sfc(
+                    pA=prev_pos, pB=curr_pos, W=self.sfc_width, ext_start=ext_start, ext_end=ext_end
+                )
             waypoints_smooth.addSFC(sfc)
             
         corridors = waypoints_smooth.getAllFlightCorridors()
@@ -239,9 +247,20 @@ class FrontEndSFC:
 
             # 2. BRIDGE POOL (The Intersection to the Next Box)
             if i < num_corridors - 1:
-                # Pairwise intersection GUARANTEES 3D geometric volume!
-                # No 3-way null-sets!
-                constraint_pools.append({'pts': degree, 'sfcs': [i, i+1], 'type': 'bridge'})
+                # Calculate the angle of the turn to see if the drone needs to brake!
+                u_curr = corridors[i].ux
+                u_next = corridors[i+1].ux
+                cos_theta = np.clip(np.dot(u_curr, u_next), -1.0, 1.0)
+                
+                # --- APEX INJECTION ---
+                # Give sharp corners extra points so the spline can decelerate smoothly
+                extra_pts = 0
+                if cos_theta < 0.5:   # Turn is sharper than 60 degrees
+                    extra_pts = degree 
+                if cos_theta < -0.5:  # Turn is sharper than 120 degrees (Hairpin)
+                    extra_pts = degree * 2
+                
+                constraint_pools.append({'pts': degree + extra_pts, 'sfcs': [i, i+1], 'type': 'bridge'})
 
         return constraint_pools
     
