@@ -6,9 +6,11 @@ import heapq
 import math
 
 class AStar_SFC_Planner:
-    def __init__(self, voxel_grid, bounds, drone_radius):
+    def __init__(self, voxel_grid, bounds, drone_radius, aircraft_type="multi-rotor", use_ring_buffer=False):
         self.voxel_grid = voxel_grid
         self.drone_radius = drone_radius
+        self.aircraft_type = aircraft_type
+        self.use_ring_buffer = use_ring_buffer
         res = self.voxel_grid.voxel_resolution
 
         # 1. Convert the entire list to an array, divide it all at once, and cast to integers!
@@ -81,8 +83,12 @@ class AStar_SFC_Planner:
                     continue
                 
                 # --- COLLISION CHECK ---
-                if neighbor_pos in self.voxel_grid.occupied_voxels_inflated:
-                    continue # It's a building! Skip.
+                if self.use_ring_buffer:
+                    if self.voxel_grid.ring_buffer.is_occupied(neighbor_pos[0], neighbor_pos[1], neighbor_pos[2]):
+                        continue
+                else:
+                    if neighbor_pos in self.voxel_grid.occupied_voxels_inflated:
+                        continue # It's a building! Skip.
                     
                 # d.iv) Skip if already fully evaluated
                 if neighbor_pos in closed_set:
@@ -141,40 +147,87 @@ class AStar_SFC_Planner:
     
     def is_line_of_sight_clear(self, idx_a, idx_b):
         """
-        Conservative Discrete Raycaster.
-        Checks ALL voxels that the mathematical line touches (using floor/ceil)
-        to completely eliminate diagonal corner clipping in the voxel grid.
+        Checks for clear line of sight using aircraft-type-specific logic.
+        - Fixed-wing: Continuous ray-box intersection math (from commit 01f4cfd)
+        - Multi-rotor: Conservative discrete raycaster (from commit 3101c83)
         """
         import numpy as np
         
-        if hasattr(self.voxel_grid, 'occupied_voxels_inflated'):
-            p0 = np.array(idx_a)
-            p1 = np.array(idx_b)
-            dist = np.linalg.norm(p1 - p0)
-            
-            if dist == 0:
+        # --- FIXED-WING: Continuous Ray-Box Intersection ---
+        if self.aircraft_type == "fixed-wing":
+            if hasattr(self.voxel_grid, 'continuous_inflated_bounds') and len(self.voxel_grid.continuous_inflated_bounds) > 0:
+                res = self.voxel_grid.voxel_resolution
+                p0 = np.array(idx_a) * res
+                p1 = np.array(idx_b) * res
+                d = p1 - p0
+                
+                with np.errstate(divide='ignore'):
+                    inv_d = 1.0 / d
+                    
+                for b_min, b_max in self.voxel_grid.continuous_inflated_bounds:
+                    t1 = (b_min - p0) * inv_d
+                    t2 = (b_max - p0) * inv_d
+                    t_min = np.minimum(t1, t2)
+                    t_max = np.maximum(t1, t2)
+                    t_enter = np.max(t_min)
+                    t_exit = np.min(t_max)
+                    
+                    if t_enter <= t_exit and t_exit >= 0 and t_enter <= 1.0:
+                        return False
                 return True
+            # Fallback to discrete if no continuous bounds available
+            elif hasattr(self.voxel_grid, 'occupied_voxels_inflated'):
+                p0 = np.array(idx_a)
+                p1 = np.array(idx_b)
+                dist = np.linalg.norm(p1 - p0)
+                if dist == 0: return True
+                steps = int(np.ceil(dist * 2))
+                for i in range(1, steps):
+                    t = i / steps
+                    point = p0 + t * (p1 - p0)
+                    voxel = tuple(np.round(point).astype(int))
+                    if self.use_ring_buffer:
+                        if self.voxel_grid.ring_buffer.is_occupied(voxel[0], voxel[1], voxel[2]):
+                            return False
+                    else:
+                        if voxel in self.voxel_grid.occupied_voxels_inflated:
+                            return False
+                return True
+            else:
+                return True
+
+        # --- MULTI-ROTOR: Conservative Discrete Raycaster ---
+        else:
+            if hasattr(self.voxel_grid, 'occupied_voxels_inflated'):
+                p0 = np.array(idx_a)
+                p1 = np.array(idx_b)
+                dist = np.linalg.norm(p1 - p0)
                 
-            # High step resolution ensures we don't jump over thin diagonal walls
-            steps = int(np.ceil(dist * 5))
-            for i in range(1, steps):
-                t = i / steps
-                point = p0 + t * (p1 - p0)
-                
-                # --- THE DISCRETE FIX: The 8-Voxel Bounding Box ---
-                # Take the floor and ceil to get every single voxel this fractional point touches!
-                x_vals = {int(np.floor(point[0])), int(np.ceil(point[0]))}
-                y_vals = {int(np.floor(point[1])), int(np.ceil(point[1]))}
-                z_vals = {int(np.floor(point[2])), int(np.ceil(point[2]))}
-                
-                # Check all touched voxels (up to 8 permutations for a 3D corner)
-                for vx in x_vals:
-                    for vy in y_vals:
-                        for vz in z_vals:
-                            if (vx, vy, vz) in self.voxel_grid.occupied_voxels_inflated:
-                                return False
+                if dist == 0:
+                    return True
+                    
+                # High step resolution ensures we don't jump over thin diagonal walls
+                steps = int(np.ceil(dist * 5))
+                for i in range(1, steps):
+                    t = i / steps
+                    point = p0 + t * (p1 - p0)
+                    
+                    # The 8-Voxel Bounding Box: floor and ceil to catch every touched voxel
+                    x_vals = {int(np.floor(point[0])), int(np.ceil(point[0]))}
+                    y_vals = {int(np.floor(point[1])), int(np.ceil(point[1]))}
+                    z_vals = {int(np.floor(point[2])), int(np.ceil(point[2]))}
+                    
+                    for vx in x_vals:
+                        for vy in y_vals:
+                            for vz in z_vals:
+                                if self.use_ring_buffer:
+                                    if self.voxel_grid.ring_buffer.is_occupied(vx, vy, vz):
+                                        return False
+                                else:
+                                    if (vx, vy, vz) in self.voxel_grid.occupied_voxels_inflated:
+                                        return False
+                return True
             return True
-        return True
     
     def get_safe_extension_length(self, idx_a, idx_b, requested_extension):
         """

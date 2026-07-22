@@ -23,7 +23,7 @@ from planning.dynamic_sfc import AsymmetricSFCManager, StandaloneWaypointsSFC
 from planning.static_sfc import StaticSFCManager
 
 class FrontEndSFC:
-    def __init__(self, sfc_height, sfc_width, sfc_start_ext, sfc_end_ext, spline_type="natural", map_type="FLOATING_BLOCKS", degree=4, aircraft_type="multi-rotor"):
+    def __init__(self, sfc_height, sfc_width, sfc_start_ext, sfc_end_ext, spline_type="natural", map_type="FLOATING_BLOCKS", degree=4, aircraft_type="multi-rotor", drone_radius=0.2):
         """
         Initializes the environment and the RRT planner.
         """
@@ -62,11 +62,15 @@ class FrontEndSFC:
         self.voxel_resolution = 0.5 
         
         # Define your drone's physical radius
-        self.drone_physical_radius = 0.5 
+        self.drone_physical_radius = drone_radius 
 
-        # Round up to the nearest whole voxel to prevent quantization loss!
-        inflation_voxels = np.ceil(self.drone_physical_radius / self.voxel_resolution)
-        self.grid_inflation_radius = inflation_voxels * self.voxel_resolution
+        # Calculate inflation radius based on aircraft type
+        if self.aircraft_type == "fixed-wing":
+            # Fixed-wing: inflate by sfc_width/2 so pre-sized SFC boxes never clip obstacles
+            self.grid_inflation_radius = (self.sfc_width / 2.0) + self.drone_physical_radius
+        else:
+            inflation_voxels = np.ceil(self.drone_physical_radius / self.voxel_resolution)
+            self.grid_inflation_radius = inflation_voxels * self.voxel_resolution
 
         # Initialize your discrete grid (Assuming you build a SparseVoxelGrid class)
         self.discrete_grid = SparseVoxelGrid(resolution=self.voxel_resolution)
@@ -111,11 +115,22 @@ class FrontEndSFC:
 
 
         self.bounds = [(0,FLOATING_PARAM.northEnd), (0,FLOATING_PARAM.eastEnd), (0,FLOATING_PARAM.downEnd)]
+        
+        from mapping.ring_buffer import RingBufferGrid
+        size_x = int(np.ceil(FLOATING_PARAM.northEnd / self.voxel_resolution)) + 1
+        size_y = int(np.ceil(FLOATING_PARAM.eastEnd / self.voxel_resolution)) + 1
+        size_z = int(np.ceil(FLOATING_PARAM.downEnd / self.voxel_resolution)) + 1
+        
+        self.discrete_grid.ring_buffer = RingBufferGrid(size_x, size_y, size_z)
+        for (vx, vy, vz) in occupied_inflated:
+            self.discrete_grid.ring_buffer.set_occupied(vx, vy, vz)
 
         self.path_gen_astar = AStar_SFC_Planner(
             voxel_grid=self.discrete_grid, 
             bounds=self.bounds, 
-            drone_radius=self.drone_physical_radius
+            drone_radius=self.drone_physical_radius,
+            aircraft_type=self.aircraft_type,
+            use_ring_buffer=True
         )
 
 
@@ -198,14 +213,89 @@ class FrontEndSFC:
         # run_sfc_volume_diagnostic(corridors)
 
         # --- THE FIX: Generate the Unified Constraint Pools ---
-        constraint_pools = self.allocate_dynamic_control_points(
-            corridors=corridors, degree=self.degree, v_max=3.0, a_max=2.0, pts_per_sec=1.0  
-        )
+        if self.aircraft_type == "fixed-wing":
+            allocation_data = self.allocate_dynamic_control_points_fixed_wing(
+                corridors=corridors, degree=self.degree, v_max=3.0, a_max=2.0, pts_per_sec=1.5
+            )
+        else:
+            allocation_data = self.allocate_dynamic_control_points(
+                corridors=corridors, degree=self.degree, v_max=3.0, a_max=2.0, pts_per_sec=1.0  
+            )
 
         self.last_corridors = corridors
         
-        # Return the pools instead of the split lists!
-        return corridors, constraint_pools, waypoints_smooth, waypoints_not_smooth
+        # Return the allocation_data instead of the split lists!
+        return corridors, allocation_data, waypoints_smooth, waypoints_not_smooth
+
+
+    def allocate_dynamic_control_points_fixed_wing(self, corridors, degree, v_max=3.0, a_max=2.0, pts_per_sec=1.0):
+        """
+        Apex-Centric Dynamic Allocation Manager for Fixed-Wing.
+        Treats intersections as independent geometric entities and returns num_pts_list.
+        """
+        num_corridors = len(corridors)
+        num_pts_list = [0] * num_corridors
+        
+        # ==========================================
+        # PASS 1: The Straightaway Baseline
+        # ==========================================
+        for i in range(num_corridors):
+            L = corridors[i].getDistancePrimaryToSecondary()
+            
+            # Pure straight-line kinematics
+            t_cruise = L / v_max
+            t_accel = 2.0 * np.sqrt(L / a_max)
+            t_target = max(t_cruise, t_accel)
+            
+            # Assign baseline points
+            N_kinematic = int(np.ceil(t_target * pts_per_sec))
+            
+            # Enforce the mathematical Local Support Floor
+            num_pts_list[i] = max(N_kinematic, 2 * degree)
+
+        # ==========================================
+        # PASS 2: The Apex Injector (The 3rd Entity)
+        # ==========================================
+        # We loop through the joints BETWEEN the corridors
+        for i in range(num_corridors - 1):
+            sfc_in = corridors[i]
+            sfc_out = corridors[i+1]
+            
+            # Grab the 3 intersection waypoints
+            p0 = np.ravel(sfc_in.primaryPosition)
+            p1 = np.ravel(sfc_in.secondaryPosition) # The Apex
+            p2 = np.ravel(sfc_out.secondaryPosition)
+            
+            v_in = p1 - p0
+            v_out = p2 - p1
+            
+            norm_in = np.linalg.norm(v_in)
+            norm_out = np.linalg.norm(v_out)
+            
+            if norm_in > 0.001 and norm_out > 0.001:
+                # Calculate the turn angle
+                cos_theta = np.dot(v_in, v_out) / (norm_in * norm_out)
+                cos_theta = np.clip(cos_theta, -1.0, 1.0)
+                
+                # The momentum shedding factor (0 for straight, 1.0 for 90-deg)
+                momentum_shed_factor = 1.0 - cos_theta
+                
+                # If it's a real turn (e.g., more than a ~25 degree bend)
+                if momentum_shed_factor > 0.1: 
+                    # 1. Create the Apex Pool
+                    # A 90-deg turn creates a pool of exactly deg*3 (start of turn,curve,end of turn) extra control points
+                    apex_pool_size = int(np.ceil(momentum_shed_factor * (degree*3)))
+                    
+                    # 2. Split the pool in half
+                    half_pool = apex_pool_size // 2
+                    
+                    # 3. Inject the shared load!
+                    # SFC A gets extra points at its tail to brake
+                    num_pts_list[i] += half_pool
+                    # SFC B gets extra points at its nose to accelerate out
+                    num_pts_list[i+1] += half_pool
+
+        return num_pts_list
 
 
     def allocate_dynamic_control_points(self, corridors, degree, v_max=3.0, a_max=2.0, pts_per_sec=1.0):
@@ -247,20 +337,9 @@ class FrontEndSFC:
 
             # 2. BRIDGE POOL (The Intersection to the Next Box)
             if i < num_corridors - 1:
-                # Calculate the angle of the turn to see if the drone needs to brake!
-                u_curr = corridors[i].ux
-                u_next = corridors[i+1].ux
-                cos_theta = np.clip(np.dot(u_curr, u_next), -1.0, 1.0)
-                
-                # --- APEX INJECTION ---
-                # Give sharp corners extra points so the spline can decelerate smoothly
-                extra_pts = 0
-                if cos_theta < 0.5:   # Turn is sharper than 60 degrees
-                    extra_pts = degree 
-                if cos_theta < -0.5:  # Turn is sharper than 120 degrees (Hairpin)
-                    extra_pts = degree * 2
-                
-                constraint_pools.append({'pts': degree + extra_pts, 'sfcs': [i, i+1], 'type': 'bridge'})
+                # Pairwise intersection GUARANTEES 3D geometric volume!
+                # No 3-way null-sets!
+                constraint_pools.append({'pts': degree, 'sfcs': [i, i+1], 'type': 'bridge'})
 
         return constraint_pools
     

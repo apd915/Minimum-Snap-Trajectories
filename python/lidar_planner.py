@@ -9,9 +9,10 @@ from core.optimize import run_qp_solver
 FILE_PATH = "data/vicon_hard 1.ply"  
 
 class VoxelGridMap:
-    def __init__(self, resolution, occupied_set):
+    def __init__(self, resolution, occupied_set, ring_buffer=None):
         self.voxel_resolution = resolution
         self.occupied_voxels_inflated = occupied_set
+        self.ring_buffer = ring_buffer
 
 def inflate_obstacles(occupied_voxels, resolution, inflation_radius_meters=1):
     print(f"Inflating {len(occupied_voxels)} obstacles for physical safety buffer...")
@@ -127,17 +128,96 @@ def run_planner_and_visualize():
         [min_bound[2], max_bound[2]]
     ]
 
-    # --- 4. RUN A* PLANNER ---
-    voxel_map = VoxelGridMap(voxel_size, safe_occupied_voxels)
-    planner = AStar_SFC_Planner(voxel_map, bounds)
+def benchmark_ring_buffer_vs_hash_map(safe_occupied_voxels, bounds, voxel_size, start_idx, goal_idx):
+    from mapping.ring_buffer import RingBufferGrid
+    
+    print("\n--- BENCHMARKING DATA STRUCTURES ---")
+    print("1. Building Ring Buffer...")
+    
+    min_x, max_x = bounds[0][0], bounds[0][1]
+    min_y, max_y = bounds[1][0], bounds[1][1]
+    min_z, max_z = bounds[2][0], bounds[2][1]
+    
+    size_x = int(np.ceil((max_x - min_x) / voxel_size)) + 1
+    size_y = int(np.ceil((max_y - min_y) / voxel_size)) + 1
+    size_z = int(np.ceil((max_z - min_z) / voxel_size)) + 1
+    
+    ring_buffer = RingBufferGrid(size_x, size_y, size_z)
+    for (vx, vy, vz) in safe_occupied_voxels:
+        ring_buffer.set_occupied(vx, vy, vz)
+        
+    print(f"Ring Buffer Built! Dimensions: {size_x}x{size_y}x{size_z}")
+    
+    voxel_map_hash = VoxelGridMap(voxel_size, safe_occupied_voxels)
+    planner_hash = AStar_SFC_Planner(voxel_map_hash, bounds, drone_radius=0.2, aircraft_type="multi-rotor", use_ring_buffer=False)
+    
+    print("Running Hash Set Benchmark (10 iterations)...")
+    hash_times = []
+    for _ in range(10):
+        start_time = time.perf_counter()
+        _ = planner_hash.search(start_idx, goal_idx)
+        hash_times.append(time.perf_counter() - start_time)
+    avg_hash_time = np.mean(hash_times) * 1000
+    
+    voxel_map_ring = VoxelGridMap(voxel_size, safe_occupied_voxels, ring_buffer)
+    planner_ring = AStar_SFC_Planner(voxel_map_ring, bounds, drone_radius=0.2, aircraft_type="multi-rotor", use_ring_buffer=True)
+    
+    print("Running Numpy Ring Buffer Benchmark (10 iterations)...")
+    ring_times = []
+    for _ in range(10):
+        start_time = time.perf_counter()
+        _ = planner_ring.search(start_idx, goal_idx)
+        ring_times.append(time.perf_counter() - start_time)
+    avg_ring_time = np.mean(ring_times) * 1000
+    
+    print(f"\n[ BENCHMARK RESULTS ]")
+    print(f"Python Hash Set Time:     {avg_hash_time:.2f} ms")
+    print(f"Python Numpy Array Time:  {avg_ring_time:.2f} ms")
+    if avg_ring_time < avg_hash_time:
+        print(f"Ring Buffer is {avg_hash_time / avg_ring_time:.2f}x FASTER!")
+    else:
+        print(f"Hash Set is {avg_ring_time / avg_hash_time:.2f}x FASTER!")
+    print("------------------------------------\n")
+    return ring_buffer
 
+def run_planner_and_visualize():
+    voxel_size = 0.1
+    
+    # --- 1. INGESTION ---
+    print(f"Loading map from {FILE_PATH}...")
+    pcd = o3d.io.read_point_cloud(FILE_PATH)
+    downsampled_pcd = pcd.voxel_down_sample(voxel_size=voxel_size)
+    downsampled_pcd.paint_uniform_color([0.5, 0.5, 0.5]) # Gray walls
+    
+    points = np.asarray(downsampled_pcd.points)
+    grid_indices = np.floor(points / voxel_size).astype(int)
+    occupied_voxels = set(tuple(idx) for idx in grid_indices)
+    
+    # --- 2. CONFIGURATION SPACE INFLATION ---
+    # Inflate by 1 voxel (0.2m) so the drone center stays away from walls
+    safe_occupied_voxels = inflate_obstacles(occupied_voxels, voxel_size, inflation_radius_meters=0.2)
+
+    # --- 3. CALCULATE MAP BOUNDS ---
+    min_bound = np.min(points, axis=0)
+    max_bound = np.max(points, axis=0)
+    bounds = [
+        [min_bound[0], max_bound[0]],
+        [min_bound[1], max_bound[1]],
+        [min_bound[2], max_bound[2]]
+    ]
+    
     start_meters = (-2.0, -2.6, 0.2) 
     goal_meters = (2.0, 3.6, 0.3)   
-
-    print(f"\nRouting from {start_meters}m to {goal_meters}m...")
     
     start_idx = meters_to_grid(start_meters, voxel_size)
     goal_idx = meters_to_grid(goal_meters, voxel_size)
+
+    # --- 4. RUN A* PLANNER ---
+    ring_buffer = benchmark_ring_buffer_vs_hash_map(safe_occupied_voxels, bounds, voxel_size, start_idx, goal_idx)
+    voxel_map = VoxelGridMap(voxel_size, safe_occupied_voxels, ring_buffer)
+    planner = AStar_SFC_Planner(voxel_map, bounds, drone_radius=0.2, aircraft_type="multi-rotor", use_ring_buffer=True)
+
+    print(f"\nRouting from {start_meters}m to {goal_meters}m...")
 
     start_time = time.perf_counter()
     path_indices = planner.search(start_idx, goal_idx)

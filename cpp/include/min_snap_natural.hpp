@@ -60,8 +60,6 @@ private:
     
     SVDResult createSVD(int16_t numControlPoints);
     
-    Eigen::MatrixXd getFastCascadedDMatrix(int16_t M, int8_t degree, int8_t derivativeOrder);
-    
     Eigen::MatrixXd getSMatrix(int16_t M, int8_t k);
 
 public:
@@ -84,6 +82,12 @@ public:
 
     // Penalty matrix generator
     Eigen::MatrixXd getWMatrix(double rhoVel = 0.0, double rhoAccel = 0.0, double rhoSnap = 1.0);
+
+    // Returns the stored W_ matrix (pure minimum-snap penalty computed at construction)
+    Eigen::MatrixXd getW() const { return W_; }
+
+    // Derivative matrix builder (needed by trajectory_planner for MINVO kinodynamic constraints)
+    Eigen::MatrixXd getFastCascadedDMatrix(int16_t M, int8_t degree, int8_t derivativeOrder);
     
     // Massively stacks SFC inequalities for the QP solver
     std::pair<Eigen::MatrixXd, Eigen::VectorXd> getSfcMatrices(

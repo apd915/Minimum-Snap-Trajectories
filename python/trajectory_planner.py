@@ -57,7 +57,7 @@ def print_sfc_diagnostics(corridors):
     print("="*60 + "\n")
 
 class TrajectoryPlanner:
-    def __init__(self, map_config, map_bounds=(100.,100.,15.), v_max=3.0, a_max=2.0, degree=4, spline_type="natural", sfc_height=1., sfc_width=1., sfc_start_ext=5., sfc_end_ext=5., aircraft_type="multi-rotor"):
+    def __init__(self, map_config, map_bounds=(100.,100.,15.), v_max=3.0, a_max=2.0, degree=4, spline_type="natural", sfc_height=1., sfc_width=1., sfc_start_ext=5., sfc_end_ext=5., aircraft_type="multi-rotor", drone_radius=0.2):
         """
         Initializes the master trajectory planner.
         """
@@ -72,20 +72,23 @@ class TrajectoryPlanner:
         self.sfc_end_ext = sfc_end_ext
         self.map_bounds=map_bounds
         self.aircraft_type = aircraft_type
+        self.drone_radius = drone_radius
         
         # Instantiate the Front-End
-        self.front_end = FrontEndSFC(self.sfc_height, self.sfc_width, self.sfc_start_ext, self.sfc_end_ext, self.spline_type, map_config, degree, self.aircraft_type)
+        self.front_end = FrontEndSFC(self.sfc_height, self.sfc_width, self.sfc_start_ext, self.sfc_end_ext, self.spline_type, map_config, degree, self.aircraft_type, self.drone_radius)
 
 
     def plan_mission(self, start_pos, end_pos, start_vel=np.zeros(3), start_acc=np.zeros(3)):
         print("--- Starting Trajectory Planning Mission ---")
         mission_start_time = time.perf_counter()
 
+        # =========================================================
+        # PHASE 1: The Front-End 
+        # =========================================================
         print("[Phase 1] Generating Safe Flight Corridors...")
         
         sfc_start_time = time.perf_counter()
-        # --- THE FIX: Unpack the Constraint Pools ---
-        corridors, constraint_pools, waypoints_smooth, waypoints_not_smooth = self.front_end.get_corridors_astar(start_pos, end_pos)
+        corridors, allocation_data, waypoints_smooth, waypoints_not_smooth = self.front_end.get_corridors_astar(start_pos, end_pos)
         sfc_duration = time.perf_counter() - sfc_start_time
         
         if not corridors:
@@ -117,8 +120,31 @@ class TrajectoryPlanner:
         while stretch_count <= max_stretches:
             print(f"\n--- Optimization Attempt {stretch_count + 1} ---")
             
-            # --- THE FIX: Pass the unified pools to the matrix compiler ---
-            A_sfc, b_sfc, total_control_points = self.front_end.compile_system_constraints(corridors, constraint_pools)
+            # Time-stretching fallback
+            if stretch_count > 0:
+                if self.front_end.aircraft_type == "fixed-wing":
+                    allocation_data = [pts + 1 for pts in allocation_data]
+                else:
+                    for pool in allocation_data:
+                        pool['pts'] += 1
+            
+            if self.front_end.aircraft_type == "fixed-wing":
+                # Convert corridors to the old dictionary format
+                sfc_constraints = []
+                for sfc in corridors:
+                    A_mat, b_vec = sfc.getAbMatrices()
+                    sfc_constraints.append({'A': A_mat, 'b': b_vec})
+                
+                total_control_points = sum(allocation_data)
+                
+                # Build unified matrices
+                A_sfc, b_sfc = self._build_overlap_constraints_fixed_wing(
+                    sfc_constraints, allocation_data, total_control_points
+                )
+            else:
+                # --- THE FIX: Pass the unified pools to the matrix compiler ---
+                # The unified pools are compiled into constraints
+                A_sfc, b_sfc, total_control_points = self.front_end.compile_system_constraints(corridors, allocation_data)
             
             print(f"[Phase 2] Translating {len(corridors)} SFCs for {total_control_points} points...")
 
@@ -163,9 +189,9 @@ class TrajectoryPlanner:
                 if stretch_count < max_stretches:
                     print("[Phase 4] Stretching time allocation (+points to straights and intersections)...")
                     # --- THE FIX: Stretch the Unified Pools ---
-                    for pool in constraint_pools:
-                        if pool['type'] == 'exclusive':
-                            pool['pts'] += self.degree
+                    for pool in corridors:
+                        # In this logic version, we iterate directly or use the allocation list
+                        pass
                 else:
                     print("[Error] Max stretching attempts reached.")
                 
@@ -323,6 +349,96 @@ class TrajectoryPlanner:
         # This will block the code from continuing until you close the window!
         plt.show()
 
+    def _build_overlap_constraints_fixed_wing(self, sfc_constraints, num_pts_list, total_num_points):
+        """
+        Converts Dean's A/b matrices and point allocations into a single massive 
+        A and b matrix pair for the QP solver, overlapping the indices to 
+        mathematically force the spline through the intersections.
+        """
+        A_ineq_list = []
+        b_ineq_list = []
+        start_idx = 0 
+        num_dimensions = 3 
+        
+        # 1. Unpack the dynamic class variable
+        north_end, east_end, alt_end = self.map_bounds
+
+        # ---------------------------------------------------------
+        # NEW: Define the absolute map boundaries (100x100x15)
+        # Hyperplanes: [+x, -x, +y, -y, +z, -z]
+        # ---------------------------------------------------------
+        A_map = np.array([
+            [ 1.0,  0.0,  0.0], # +x (North)
+            [-1.0,  0.0,  0.0], # -x (South)
+            [ 0.0,  1.0,  0.0], # +y (East)
+            [ 0.0, -1.0,  0.0], # -y (West)
+            [ 0.0,  0.0,  1.0], # +z (Up/Alt)
+            [ 0.0,  0.0, -1.0]  # -z (Down/Ground)
+        ])
+        b_map = np.array([north_end, 0.0, east_end, 0.0, alt_end, 0.0])
+        
+        for i, sfc in enumerate(sfc_constraints):
+            # ---------------------------------------------------------
+            # NEW: Intersect the SFC with the Map Bounding Box
+            # ---------------------------------------------------------
+            A_mat = np.vstack((sfc['A'], A_map))
+            b_vec = np.concatenate((np.array(sfc['b']).flatten(), b_map))
+
+            # ---------------------------------------------------------
+            # VIRTUAL RUNWAY LOGIC
+            # ---------------------------------------------------------
+            if getattr(self, 'spline_type', 'natural') == "natural":
+                # Only apply to the takeoff and landing corridors
+                if i == 0 or i == len(sfc_constraints) - 1:
+                    runway_length = 30.0
+                    
+                    # Scan every wall in the combined matrix
+                    for k in range(len(b_vec)):
+                        normal = A_mat[k]
+                        val = b_vec[k]
+                        
+                        # Relax X Map Boundaries
+                        if np.allclose(normal, [1, 0, 0]) and np.isclose(val, north_end, atol=1e-2):
+                            b_vec[k] += runway_length
+                        elif np.allclose(normal, [-1, 0, 0]) and np.isclose(val, 0.0, atol=1e-2):
+                            b_vec[k] += runway_length
+                            
+                        # Relax Y Map Boundaries
+                        elif np.allclose(normal, [0, 1, 0]) and np.isclose(val, east_end, atol=1e-2):
+                            b_vec[k] += runway_length
+                        elif np.allclose(normal, [0, -1, 0]) and np.isclose(val, 0.0, atol=1e-2):
+                            b_vec[k] += runway_length
+                            
+                        # Relax Z Map Boundaries (Ceiling and Floor)
+                        elif np.allclose(normal, [0, 0, 1]) and np.isclose(val, alt_end, atol=1e-2):
+                            b_vec[k] += runway_length
+                        elif np.allclose(normal, [0, 0, -1]) and np.isclose(val, 0.0, atol=1e-2):
+                            b_vec[k] += runway_length
+            # ---------------------------------------------------------
+            
+            num_pts_in_box = num_pts_list[i]
+            # This automatically adjusts to the new size (original + 6 map walls)
+            num_inequalities = A_mat.shape[0] 
+            
+            for j in range(num_pts_in_box):
+                global_cp_index = start_idx + j
+                A_padded = np.zeros((num_inequalities, total_num_points * num_dimensions))
+                
+                col_start = global_cp_index * num_dimensions
+                col_end = col_start + num_dimensions
+                A_padded[:, col_start:col_end] = A_mat
+                
+                A_ineq_list.append(A_padded)
+                b_ineq_list.append(b_vec)
+                
+            start_idx += (num_pts_in_box - self.degree)
+            
+        A_sfc_total = np.vstack(A_ineq_list)
+        b_sfc_total = np.concatenate(b_ineq_list)
+        
+        return A_sfc_total, b_sfc_total
+
+# Execution Test
 # ==========================================
 # Execution Test
 # ==========================================

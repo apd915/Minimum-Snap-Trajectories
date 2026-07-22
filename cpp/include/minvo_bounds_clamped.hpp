@@ -237,6 +237,7 @@ inline std::unordered_map<int, std::unordered_map<std::string, Eigen::MatrixXd>>
                 -3.05217500e-04, -5.59089604e-03, -3.40947601e-02, -2.91344951e-02,  5.18091719e-01,  5.50922670e-01,
                 -1.38401667e-04, -2.61597889e-03, -1.58478801e-02, -4.74975581e-02, -5.79730313e-02,  1.12342885e+00;
     stencils[5]["end_0"] = d5_end_0;
+    return stencils;
 }
 
 } // namespace minvo
