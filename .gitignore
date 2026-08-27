@@ -10,3 +10,5 @@ token.txt
 *.exe
 *.ply
 .vscode/
+cpp/test_solver.cpp
+cpp/test_minvo.py

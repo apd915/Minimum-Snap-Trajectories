@@ -14,17 +14,29 @@ namespace tests {
 // ==========================================
 // Helper: Build a simple obstacle field for testing
 // ==========================================
+
+// ---------------------------------------------------------------------------------------
+// COORDINATE CONVENTION
+//
+// These fixtures were originally written for a 0..100 m positive-orthant world with
+// POSITIVE-UP z. The planner works in NED: the A* geofence is +/- map_bounds/2 about the
+// ORIGIN, and z is NEGATIVE-up (altitude 5 m is z = -5). Under the old coordinates the start
+// sat several metres underground -- rejected by the min_altitude floor -- and the goal fell
+// outside the geofence entirely, so A* correctly returned a single-point path and every
+// assertion on corridor count failed. The scene below is the same layout expressed in NED:
+// x/y centred on the origin, altitudes negative and inside the +/- map_bounds.z()/2 band.
+// ---------------------------------------------------------------------------------------
 static std::vector<mapping::ObstacleBox> build_test_obstacles() {
     std::vector<mapping::ObstacleBox> obstacles;
 
     // A wall at X=50, spanning Y=[30,70], Z=[0,15]
-    obstacles.push_back({{50.0, 30.0, 0.0}, {52.0, 70.0, 15.0}});
+    obstacles.push_back({{0.0, -20.0, -7.0}, {2.0, 20.0, 0.0}});
 
     // A pillar at (30, 50), Z=[0,10]
-    obstacles.push_back({{28.0, 48.0, 0.0}, {32.0, 52.0, 10.0}});
+    obstacles.push_back({{-22.0, -2.0, -5.0}, {-18.0, 2.0, 0.0}});
 
     // A pillar at (70, 50), Z=[0,10]
-    obstacles.push_back({{68.0, 48.0, 0.0}, {72.0, 52.0, 10.0}});
+    obstacles.push_back({{18.0, -2.0, -5.0}, {22.0, 2.0, 0.0}});
 
     return obstacles;
 }
@@ -46,10 +58,12 @@ TEST(TrajectoryPlannerTest, ClampedFullPipeline) {
     config.map_bounds = Eigen::Vector3d(100.0, 100.0, 15.0);
 
     auto obstacles = build_test_obstacles();
-    TrajectoryPlanner planner(config, obstacles, 3.0, 2.0); // v_max=3, a_max=2
+    auto grid = std::make_shared<mapping::SparseVoxelGrid>(config.voxel_resolution, config.drone_physical_radius);
+    grid->update_from_obstacles(obstacles);
+    TrajectoryPlanner planner(config, grid, 3.0, 2.0); // v_max=3, a_max=2
 
-    Eigen::Vector3d start(2.0, 2.0, 5.0);
-    Eigen::Vector3d goal(98.0, 98.0, 10.0);
+    Eigen::Vector3d start(-30.0, -30.0, -4.0);
+    Eigen::Vector3d goal(30.0, 30.0, -5.0);
 
     auto result = planner.plan_mission(start, goal);
 
@@ -85,10 +99,12 @@ TEST(TrajectoryPlannerTest, EmptyMapNatural) {
     config.map_bounds = Eigen::Vector3d(50.0, 50.0, 15.0);
 
     std::vector<mapping::ObstacleBox> no_obstacles;
-    TrajectoryPlanner planner(config, no_obstacles, 5.0, 3.0); // v_max=5, a_max=3
+    auto grid = std::make_shared<mapping::SparseVoxelGrid>(config.voxel_resolution, config.drone_physical_radius);
+    grid->update_from_obstacles(no_obstacles);
+    TrajectoryPlanner planner(config, grid, 5.0, 3.0); // v_max=5, a_max=3
 
-    Eigen::Vector3d start(2.0, 2.0, 5.0);
-    Eigen::Vector3d goal(48.0, 48.0, 10.0);
+    Eigen::Vector3d start(-20.0, -20.0, -4.0);
+    Eigen::Vector3d goal(20.0, 20.0, -5.0);
 
     auto result = planner.plan_mission(start, goal);
 
@@ -127,9 +143,10 @@ TEST(TrajectoryPlannerTest, FloatingBlocksBenchmark) {
     for (int i = 0; i < num_blocks; ++i) {
         for (int j = 0; j < num_blocks; ++j) {
             for (int k = 0; k < num_blocks; ++k) {
-                double cx = x_start + i * x_inc;
-                double cy = y_start + j * y_inc;
-                double cz = z_start + k * z_inc;
+                // Centred on the origin and negative-up, to match the NED geofence.
+                double cx = x_start + i * x_inc - 50.0;
+                double cy = y_start + j * y_inc - 50.0;
+                double cz = -(z_start + k * z_inc) * 0.5;
                 obstacles.push_back({
                     {cx - block_width / 2.0, cy - block_width / 2.0, cz - block_width / 2.0},
                     {cx + block_width / 2.0, cy + block_width / 2.0, cz + block_width / 2.0}
@@ -138,10 +155,12 @@ TEST(TrajectoryPlannerTest, FloatingBlocksBenchmark) {
         }
     }
 
-    TrajectoryPlanner planner(config, obstacles, 3.0, 2.0);
+    auto grid = std::make_shared<mapping::SparseVoxelGrid>(config.voxel_resolution, config.drone_physical_radius);
+    grid->update_from_obstacles(obstacles);
+    TrajectoryPlanner planner(config, grid, 3.0, 2.0);
 
-    Eigen::Vector3d start(2.0, 2.0, 5.0);
-    Eigen::Vector3d goal(100.0, 100.0, 15.0);
+    Eigen::Vector3d start(-30.0, -30.0, -4.0);
+    Eigen::Vector3d goal(30.0, 30.0, -6.0);
 
     auto result = planner.plan_mission(start, goal);
 
@@ -171,7 +190,6 @@ TEST(TrajectoryPlannerTest, MinvoBuilderShape) {
     Eigen::MatrixXd D_vel = optimizer.get_fast_cascaded_D_matrix(num_segments, degree, 1);
     
     // D_vel is (rows, cols)
-    int D_rows = D_vel.rows();
     int D_cols = D_vel.cols();
 
     // Call MINVO builder

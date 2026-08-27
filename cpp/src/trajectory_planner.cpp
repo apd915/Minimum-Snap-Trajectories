@@ -3,6 +3,8 @@
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
+#include <limits>
+#include <cmath>
 
 namespace trajectory_planner {
 
@@ -51,10 +53,16 @@ static Eigen::SparseMatrix<double> kron_dense_with_identity(
 // ==========================================
 TrajectoryPlanner::TrajectoryPlanner(
     const FrontEndConfig& config,
-    const std::vector<mapping::ObstacleBox>& obstacles,
+    std::shared_ptr<mapping::SparseVoxelGrid> grid,
     double v_max, double a_max)
     : config_(config), v_max_(v_max), a_max_(a_max) {
-    front_end_ = std::make_unique<FrontEndSFC>(config, obstacles);
+    // Keep the front-end allocator's kinematic limits in sync with the limits the
+    // MINVO constraints are actually built against, otherwise the allocator sizes
+    // the trajectory duration for one speed and the QP enforces another.
+    config_.v_max = v_max;
+    max_solve_time_ms_ = config_.max_solve_time_ms;
+    config_.a_max = a_max;
+    front_end_ = std::make_unique<FrontEndSFC>(config_, std::move(grid));
 }
 
 // ==========================================
@@ -78,13 +86,15 @@ PlanningResult TrajectoryPlanner::plan_mission(
 
     if (fe_result.corridors.empty()) {
         std::cout << "[Error] No valid path found." << std::endl;
-        return {Eigen::VectorXd(), 0, false, sfc_ms, 0, 0, sfc_ms};
+        return {Eigen::VectorXd(), Eigen::VectorXd(), fe_result.corridors, config_.degree, 0, false, false, sfc_ms, 0, 0, sfc_ms, 0.0, 0};
     }
 
     // =========================================================
     // Build SE Boundary Matrix (3 x 6)
     // S = [start_pos, start_vel, start_acc]  (3 x 3)
     // =========================================================
+    Eigen::Vector3d actual_end_pos = fe_result.actual_end_pos;
+    
     Eigen::MatrixXd S(3, 3);
     S.col(0) = start_pos;
     S.col(1) = start_vel;
@@ -94,16 +104,56 @@ PlanningResult TrajectoryPlanner::plan_mission(
     if (config_.spline_type == "natural") {
         // E_standard = [end_pos, zeros, zeros]
         Eigen::MatrixXd E(3, 3);
-        E.col(0) = end_pos;
+        E.col(0) = actual_end_pos;
         E.col(1) = Eigen::Vector3d::Zero();
         E.col(2) = Eigen::Vector3d::Zero();
         SE << S, E;
     } else {
-        // Clamped: E_reversed = [zeros, zeros, end_pos]
+        // Clamped: E = [end_accel, end_velocity, end_position].
+        //
+        // TERMINAL VELOCITY, AND WHY IT IS BOUNDED THE WAY IT IS
+        // -----------------------------------------------------
+        // Pinning a full stop at every horizon is safe but slow: with a goal beyond
+        // planning_horizon the vehicle decelerates to rest on every replan and never builds
+        // speed. It is also the dominant cause of first-attempt infeasibility -- the
+        // boundary block is implicated in essentially every failed solve.
+        //
+        // Carrying speed through the horizon is only safe if a full stop remains possible
+        // inside space we have actually MEASURED. Otherwise a replan that fails to arrive
+        // leaves the vehicle moving toward the end of its committed trajectory with nothing
+        // planned beyond it, in space that was never observed. So:
+        //
+        //     v_end <= sqrt(2 * a_max * d_free_ahead)
+        //
+        // d_free_ahead is the last corridor's forward extent past the trajectory endpoint.
+        // Corridors are obstacle-free AND stop at the FREE/UNKNOWN frontier, so that
+        // distance is measured-empty by construction. The bound therefore self-limits: with
+        // an obstacle or unexplored space close ahead it collapses to zero and we recover
+        // the old stop-at-horizon behaviour exactly when it is needed.
+        //
+        // The guarantee is only real if the stop is actually executable, so the consumer
+        // must be able to brake within d_free_ahead if replanning stalls -- see the braking
+        // tail in minimum_snap_manager.cpp. Changing one without the other breaks the
+        // argument.
+        Eigen::Vector3d end_vel = Eigen::Vector3d::Zero();
+        if (!fe_result.reached_goal && !fe_result.corridors.empty()) {
+            const auto& last = fe_result.corridors.back();
+            const double d_free_ahead =
+                std::max(0.0, last.bounds(0) - last.getDistancePrimaryToSecondary());
+
+            // Keep margin: spend only part of the measured-free run-out on braking, so the
+            // stop completes with room rather than exactly at the frontier.
+            constexpr double kBrakeMargin = 0.6;
+            const double v_safe = std::sqrt(2.0 * a_max_ * kBrakeMargin * d_free_ahead);
+
+            const double v_end_mag = std::min(v_safe, v_max_);
+            if (v_end_mag > 1e-3) end_vel = last.ux * v_end_mag;
+        }
+
         Eigen::MatrixXd E(3, 3);
-        E.col(0) = Eigen::Vector3d::Zero();
-        E.col(1) = Eigen::Vector3d::Zero();
-        E.col(2) = end_pos;
+        E.col(0) = Eigen::Vector3d::Zero();   // terminal acceleration stays zero
+        E.col(1) = end_vel;
+        E.col(2) = actual_end_pos;
         SE << S, E;
     }
 
@@ -113,7 +163,16 @@ PlanningResult TrajectoryPlanner::plan_mission(
     int max_stretches = 5;
     int stretch_count = 0;
     Eigen::VectorXd optimal_cp;
+    Eigen::VectorXd current_knots;
+    // Accumulated across ALL attempts. These used to be plain assignments, so a run that
+    // retried reported only the LAST attempt's solve time while TOTAL covered every
+    // attempt -- the difference silently piled up in "Matrix & System Overhead".
     double opt_ms = 0.0;
+    double matrix_ms = 0.0;
+    int attempts = 0;
+    double attempt_prim_res = 0.0;
+    QpFailureInfo qp_failure;
+    double prev_prim_res = std::numeric_limits<double>::infinity();
     bool solve_success = false;
     int total_control_points = 0;
 
@@ -137,6 +196,11 @@ PlanningResult TrajectoryPlanner::plan_mission(
         // =========================================================
         // PHASE 2: Build Constraint Matrices
         // =========================================================
+        attempts++;
+        // Sentinel: only a real solve overwrites this. Distinguishes "the solver ran and
+        // stalled" from "we never got as far as the solver".
+        attempt_prim_res = std::numeric_limits<double>::quiet_NaN();
+        auto matrix_start = std::chrono::high_resolution_clock::now();
         Eigen::MatrixXd A_sfc;
         Eigen::VectorXd b_sfc;
 
@@ -155,6 +219,9 @@ PlanningResult TrajectoryPlanner::plan_mission(
             for (const auto& pool : allocation_pools) total_control_points += pool.pts;
         }
 
+        auto matrix_end = std::chrono::high_resolution_clock::now();
+        matrix_ms += std::chrono::duration<double, std::milli>(matrix_end - matrix_start).count();
+
         std::cout << "[Phase 2] Translating " << corridors.size()
                   << " SFCs for " << total_control_points << " points..." << std::endl;
 
@@ -164,6 +231,13 @@ PlanningResult TrajectoryPlanner::plan_mission(
         auto opt_start = std::chrono::high_resolution_clock::now();
 
         int num_segments = total_control_points - config_.degree;
+
+        // Row extents of each stacked constraint block, so a failure can be attributed to a
+        // named requirement instead of just a residual. Declared out here to survive into
+        // the catch.
+        int rows_eq = 0, rows_sfc = 0, rows_vel = 0, rows_accel = 0;
+        Eigen::VectorXd l_all, u_all;
+        Eigen::SparseMatrix<double> A_all;
 
         try {
             Eigen::MatrixXd W, B_combined, D_vel, D_accel;
@@ -176,6 +250,7 @@ PlanningResult TrajectoryPlanner::plan_mission(
                 W = optimizer.getW();
                 B_combined = optimizer.getBCombined();
                 SE_qp = SE;
+                current_knots = optimizer.getKnots();
             } else {
                 MinSnapEvalClamped optimizer(num_segments, config_.degree);
                 D_vel = optimizer.get_fast_cascaded_D_matrix(num_segments, config_.degree, 1);
@@ -184,6 +259,7 @@ PlanningResult TrajectoryPlanner::plan_mission(
                 W = optimizer.get_W();
                 B_combined = optimizer.get_B_combined();
                 SE_qp = SE * B_d3;
+                current_knots = optimizer.get_knots();
             }
 
             int N = static_cast<int>(W.rows()); // == total_control_points
@@ -220,7 +296,8 @@ PlanningResult TrajectoryPlanner::plan_mission(
             // 3. GEOMETRIC CONSTRAINTS (Safe Flight Corridors)
             // ==========================================
             Eigen::SparseMatrix<double> A_sfc_sparse = A_sfc.sparseView();
-            Eigen::VectorXd l_sfc = Eigen::VectorXd::Constant(b_sfc.size(), -std::numeric_limits<double>::infinity());
+            // Must be OSQP's finite sentinel, NOT IEEE -inf (see kQpInfinity docs).
+            Eigen::VectorXd l_sfc = Eigen::VectorXd::Constant(b_sfc.size(), -kQpInfinity);
             Eigen::VectorXd u_sfc = b_sfc;
 
             // ==========================================
@@ -236,10 +313,16 @@ PlanningResult TrajectoryPlanner::plan_mission(
             Eigen::SparseMatrix<double> A_vel_3D = kron_with_identity(A_vel_1D, 3);
             Eigen::SparseMatrix<double> A_accel_3D = kron_with_identity(A_accel_1D, 3);
 
-            Eigen::VectorXd l_vel = Eigen::VectorXd::Constant(A_vel_3D.rows(), -v_max_);
-            Eigen::VectorXd u_vel = Eigen::VectorXd::Constant(A_vel_3D.rows(), v_max_);
-            Eigen::VectorXd l_accel = Eigen::VectorXd::Constant(A_accel_3D.rows(), -a_max_);
-            Eigen::VectorXd u_accel = Eigen::VectorXd::Constant(A_accel_3D.rows(), a_max_);
+            // Per-axis box. See FrontEndConfig::enforce_norm_limits: as written this bounds each
+            // AXIS, so it permits ||v|| up to v_max*sqrt(3), not v_max.
+            const double axis_scale =
+                config_.enforce_norm_limits ? (1.0 / std::sqrt(3.0)) : 1.0;
+            const double v_axis = v_max_ * axis_scale;
+            const double a_axis = a_max_ * axis_scale;
+            Eigen::VectorXd l_vel = Eigen::VectorXd::Constant(A_vel_3D.rows(), -v_axis);
+            Eigen::VectorXd u_vel = Eigen::VectorXd::Constant(A_vel_3D.rows(), v_axis);
+            Eigen::VectorXd l_accel = Eigen::VectorXd::Constant(A_accel_3D.rows(), -a_axis);
+            Eigen::VectorXd u_accel = Eigen::VectorXd::Constant(A_accel_3D.rows(), a_axis);
 
             // ==========================================
             // 5. ASSEMBLE THE MASTER MATRICES
@@ -292,20 +375,118 @@ PlanningResult TrajectoryPlanner::plan_mission(
             std::cout << "[Phase 3] Running OSQP Solver (" << total_rows << " constraints, "
                       << total_cols << " variables)..." << std::endl;
 
-            optimal_cp = run_qp_solver(P_osqp, q_osqp, A_osqp, l_osqp, u_osqp);
+            rows_eq = static_cast<int>(A_eq_3D.rows());
+            rows_sfc = static_cast<int>(A_sfc_sparse.rows());
+            rows_vel = static_cast<int>(A_vel_3D.rows());
+            rows_accel = static_cast<int>(A_accel_3D.rows());
+            l_all = l_osqp; u_all = u_osqp; A_all = A_osqp;
+
+            optimal_cp = run_qp_solver(P_osqp, q_osqp, A_osqp, l_osqp, u_osqp,
+                                       &attempt_prim_res, &qp_failure,
+                                       // Per-solve cap. The cycle budget below bounds the SUM
+                                       // across attempts, but it is checked between attempts and
+                                       // so cannot interrupt one long solve; this does. Thirds
+                                       // it so ~3 full-length attempts fit before the cycle bail,
+                                       // bounding a worst-case replan at roughly (budget + one
+                                       // solve) rather than (budget + one unbounded solve).
+                                       max_solve_time_ms_ > 0.0
+                                           ? max_solve_time_ms_ / 3000.0 : 0.0,
+                                       config_.qp_accept_violation);
 
             auto opt_end = std::chrono::high_resolution_clock::now();
-            opt_ms = std::chrono::duration<double, std::milli>(opt_end - opt_start).count();
+            double this_opt_ms = std::chrono::duration<double, std::milli>(opt_end - opt_start).count();
+            opt_ms += this_opt_ms;
             solve_success = true;
 
-            std::cout << "[Phase 3] Optimization Successful in " << opt_ms << " ms!" << std::endl;
+            std::cout << "[Phase 3] Optimization Successful in " << this_opt_ms << " ms!" << std::endl;
             break; // Success — exit the retry loop
 
         } catch (const std::exception& e) {
             auto opt_end = std::chrono::high_resolution_clock::now();
-            opt_ms = std::chrono::duration<double, std::milli>(opt_end - opt_start).count();
+            opt_ms += std::chrono::duration<double, std::milli>(opt_end - opt_start).count();
 
             std::cout << "[Phase 4] Solver failed (Kinematically impossible): " << e.what() << std::endl;
+
+            // --- WHICH constraint block is impossible? ---------------------------------
+            // Blame is assigned from OSQP's primal-infeasibility certificate where one
+            // exists (its nonzeros are precisely the rows forming the contradiction), and
+            // otherwise from per-row violation of the last iterate. Knowing that it is, say,
+            // the velocity block rather than the corridors is the difference between
+            // "loosen v_max / lengthen the trajectory" and "the corridor geometry is wrong".
+            if (rows_eq + rows_sfc + rows_vel + rows_accel > 0) {
+                const char* names[4] = {"boundary(start/end state)", "corridors(SFC+map)",
+                                        "velocity(MINVO)", "acceleration(MINVO)"};
+                const int starts[4] = {0, rows_eq, rows_eq + rows_sfc,
+                                       rows_eq + rows_sfc + rows_vel};
+                const int counts[4] = {rows_eq, rows_sfc, rows_vel, rows_accel};
+
+                double mass[4] = {0, 0, 0, 0};
+                int hits[4] = {0, 0, 0, 0};
+                double worst[4] = {0, 0, 0, 0};
+
+                const bool have_cert = qp_failure.prim_inf_cert.size() ==
+                                       static_cast<long>(rows_eq + rows_sfc + rows_vel + rows_accel);
+                Eigen::VectorXd Ax;
+                if (!have_cert && qp_failure.x.size() == A_all.cols()) Ax = A_all * qp_failure.x;
+
+                for (int b = 0; b < 4; ++b) {
+                    for (int r = starts[b]; r < starts[b] + counts[b]; ++r) {
+                        if (have_cert) {
+                            const double c = std::abs(qp_failure.prim_inf_cert(r));
+                            if (c > 1e-9) { ++hits[b]; mass[b] += c; worst[b] = std::max(worst[b], c); }
+                        } else if (Ax.size() > r) {
+                            const double v = std::max(Ax(r) - u_all(r), l_all(r) - Ax(r));
+                            if (v > 1e-6) { ++hits[b]; mass[b] += v; worst[b] = std::max(worst[b], v); }
+                        }
+                    }
+                }
+                std::cout << "[Phase 4] blame ("
+                          << (have_cert ? "infeasibility certificate" : "violation of last iterate")
+                          << "):" << std::endl;
+                for (int b = 0; b < 4; ++b) {
+                    if (counts[b] == 0) continue;
+                    std::cout << "            " << names[b] << ": " << hits[b] << "/" << counts[b]
+                              << " rows, total " << mass[b] << ", worst " << worst[b] << std::endl;
+                }
+            }
+
+            // Give up when stretching stops buying anything. Each retry adds a point per
+            // pool, so the QP gets bigger and slower every time; if the primal residual is
+            // no longer improving, the obstruction is geometric rather than a shortage of
+            // flight time and further attempts only burn milliseconds. Observed in practice:
+            // residual 0.578 -> 0.287 -> 0.287 -> ... while the solve cost kept climbing,
+            // turning one failed plan into hundreds of milliseconds.
+            // If the attempt failed BEFORE reaching OSQP (e.g. the trajectory was too short
+            // for the snap stencil), there is no residual to compare -- and stretching is
+            // exactly the right remedy, so keep going rather than bailing on a stale value.
+            const bool solver_ran = !std::isnan(attempt_prim_res);
+            const bool improving = !solver_ran || (attempt_prim_res < prev_prim_res * 0.9);
+            if (solver_ran) prev_prim_res = attempt_prim_res;
+            if (!improving) {
+                std::cout << "[Phase 4] Residual stalled at " << attempt_prim_res
+                          << "; time-stretching cannot fix this. Giving up early." << std::endl;
+                break;
+            }
+
+            // Hard latency bound on the retry cycle.
+            //
+            // The stall check above only fires when the residual STOPS improving. A residual
+            // that keeps creeping down by more than 10% a go passes it every time, so a doomed
+            // plan can still run the full stretch budget -- and every one of those attempts
+            // costs a whole max_iter of OSQP, because a solve that is heading for infeasibility
+            // spends its entire iteration budget before it can certify that. Measured in sim:
+            // 4 attempts, 268 ms of OSQP inside a 289 ms replan, against a 100 ms period.
+            //
+            // A missed replan is cheap and already handled -- replan_loop keeps flying the
+            // committed trajectory and tries again in 100 ms. A replan that overruns the period
+            // is not: it starves the 50 Hz dispatch loop. So bound the cycle by wall time and
+            // let the next one, with a fresher map, have a go.
+            if (max_solve_time_ms_ > 0.0 && opt_ms >= max_solve_time_ms_) {
+                std::cout << "[Phase 4] Solve budget exhausted (" << opt_ms << " ms over "
+                          << attempts << " attempt(s), budget " << max_solve_time_ms_
+                          << " ms). Abandoning this replan." << std::endl;
+                break;
+            }
 
             if (stretch_count < max_stretches) {
                 std::cout << "[Phase 4] Stretching time allocation (+1 point per pool)..." << std::endl;
@@ -318,19 +499,20 @@ PlanningResult TrajectoryPlanner::plan_mission(
 
     auto mission_end = std::chrono::high_resolution_clock::now();
     double total_ms = std::chrono::duration<double, std::milli>(mission_end - mission_start).count();
-    double overhead_ms = total_ms - sfc_ms - opt_ms;
+    double overhead_ms = total_ms - sfc_ms - opt_ms - matrix_ms;
 
     std::cout << "\n=================================================="
               << "\n          TRAJECTORY PLANNER BENCHMARKS"
               << "\n=================================================="
               << "\nSFC Generation (Front-End):   " << sfc_ms << " ms"
-              << "\nPath Generation (Back-End):   " << opt_ms << " ms"
-              << "\nMatrix & System Overhead:     " << overhead_ms << " ms"
+              << "\nPath Generation (Back-End):   " << opt_ms << " ms  (" << attempts << " attempt(s))"
+              << "\nConstraint Matrix Build:      " << matrix_ms << " ms"
+              << "\nSystem Overhead:              " << overhead_ms << " ms"
               << "\n--------------------------------------------------"
               << "\nTOTAL PLANNING TIME:          " << total_ms << " ms"
               << "\n==================================================" << std::endl;
 
-    return {optimal_cp, total_control_points, solve_success, sfc_ms, opt_ms, overhead_ms, total_ms};
+    return {optimal_cp, current_knots, corridors, config_.degree, total_control_points, solve_success, fe_result.reached_goal, sfc_ms, opt_ms, overhead_ms, total_ms, matrix_ms, attempts};
 }
 
 // ==========================================
@@ -349,9 +531,16 @@ std::pair<Eigen::MatrixXd, Eigen::VectorXd> TrajectoryPlanner::build_overlap_con
     for (const auto& pool : pools) total_pts += pool.pts;
 
     // Map boundary hyperplanes: [+x, -x, +y, -y, +z, -z]
-    double north_end = config_.map_bounds.x();
-    double east_end = config_.map_bounds.y();
-    double alt_end = config_.map_bounds.z();
+    //
+    // The geofence must match the one A* searches in (front_end.cpp builds the A*
+    // bounds as +/- map_bounds/2 about the origin), and it must be expressed in NED,
+    // where z is NEGATIVE-up. The previous form (b = [X, 0, Y, 0, Z, 0]) encoded a
+    // positive-orthant box, which imposes x>=0, y>=0 and -- fatally -- z>=0, i.e. it
+    // required every control point to sit at or below ground level. That made the QP
+    // primal infeasible on every replan flown at a positive altitude.
+    double half_north = config_.map_bounds.x() / 2.0;
+    double half_east = config_.map_bounds.y() / 2.0;
+    double half_alt = config_.map_bounds.z() / 2.0;
 
     Eigen::MatrixXd A_map(6, 3);
     A_map << 1.0,  0.0,  0.0,
@@ -361,7 +550,7 @@ std::pair<Eigen::MatrixXd, Eigen::VectorXd> TrajectoryPlanner::build_overlap_con
              0.0,  0.0,  1.0,
              0.0,  0.0, -1.0;
     Eigen::VectorXd b_map(6);
-    b_map << north_end, 0.0, east_end, 0.0, alt_end, 0.0;
+    b_map << half_north, half_north, half_east, half_east, half_alt, half_alt;
 
     std::vector<Eigen::MatrixXd> A_rows;
     std::vector<Eigen::VectorXd> b_rows;
@@ -377,9 +566,33 @@ std::pair<Eigen::MatrixXd, Eigen::VectorXd> TrajectoryPlanner::build_overlap_con
             b_parts.push_back(corridors[sfc_idx].b_vec);
         }
 
-        // Append map boundaries
-        A_parts.push_back(A_map);
-        b_parts.push_back(b_map);
+        // Append map boundaries -- but only when they could actually bind.
+        //
+        // These 6 rows were previously stamped onto EVERY control point, doubling the
+        // inequality block. In practice a control point is already confined to its corridor,
+        // and corridors sit nowhere near the +/-50 m geofence, so the rows are inactive
+        // almost always. Redundant inactive constraints are not free: they enlarge the KKT
+        // system and add dual variables with nothing to pin them down, which is precisely the
+        // degeneracy that makes ADMM crawl toward its iteration limit. Include them only when
+        // a corner of some corridor in this pool actually approaches the boundary.
+        constexpr double kMapMargin = 5.0;   // metres of slack before we bother constraining
+        bool map_rows_can_bind = false;
+        for (int sfc_idx : pool.sfc_indices) {
+            const Eigen::Matrix<double, 3, 8> verts = corridors[sfc_idx].getAllVertices_3D();
+            for (int v = 0; v < 8; ++v) {
+                if (std::abs(verts(0, v)) > half_north - kMapMargin ||
+                    std::abs(verts(1, v)) > half_east  - kMapMargin ||
+                    std::abs(verts(2, v)) > half_alt   - kMapMargin) {
+                    map_rows_can_bind = true;
+                    break;
+                }
+            }
+            if (map_rows_can_bind) break;
+        }
+        if (map_rows_can_bind) {
+            A_parts.push_back(A_map);
+            b_parts.push_back(b_map);
+        }
 
         // Combine into single A_pool/b_pool
         int total_ineq = 0;
@@ -405,30 +618,32 @@ std::pair<Eigen::MatrixXd, Eigen::VectorXd> TrajectoryPlanner::build_overlap_con
             }
 
             if (is_first || is_last) {
+                // The map hyperplanes were appended last, so they are exactly the final
+                // 6 rows of the pool. Relaxing them by index avoids having to pattern-match
+                // on the b-values (which is brittle whenever the geofence convention changes).
                 double runway_length = 30.0;
-                for (int k = 0; k < static_cast<int>(b_pool.size()); ++k) {
-                    Eigen::Vector3d normal = A_pool.row(k).transpose();
-                    double val = b_pool(k);
-
-                    // Relax map boundaries
-                    if (normal.isApprox(Eigen::Vector3d(1, 0, 0), 1e-2) && std::abs(val - north_end) < 1e-2)
-                        b_pool(k) += runway_length;
-                    else if (normal.isApprox(Eigen::Vector3d(-1, 0, 0), 1e-2) && std::abs(val) < 1e-2)
-                        b_pool(k) += runway_length;
-                    else if (normal.isApprox(Eigen::Vector3d(0, 1, 0), 1e-2) && std::abs(val - east_end) < 1e-2)
-                        b_pool(k) += runway_length;
-                    else if (normal.isApprox(Eigen::Vector3d(0, -1, 0), 1e-2) && std::abs(val) < 1e-2)
-                        b_pool(k) += runway_length;
-                    else if (normal.isApprox(Eigen::Vector3d(0, 0, 1), 1e-2) && std::abs(val - alt_end) < 1e-2)
-                        b_pool(k) += runway_length;
-                    else if (normal.isApprox(Eigen::Vector3d(0, 0, -1), 1e-2) && std::abs(val) < 1e-2)
-                        b_pool(k) += runway_length;
+                for (int k = static_cast<int>(b_pool.size()) - 6; k < static_cast<int>(b_pool.size()); ++k) {
+                    b_pool(k) += runway_length;
                 }
             }
         }
 
-        // Lock control points inside the overlapping volume
+        // Lock control points inside the overlapping volume.
+        //
+        // The first 3 and last 3 control points are skipped: for a clamped B-spline the
+        // boundary equality constraints (start position/velocity/acceleration, and the
+        // terminal condition) determine them UNIQUELY, so they are not free variables the
+        // optimizer can move. Adding inequality rows on top of an already-determined
+        // variable cannot change the solution -- it can only render the QP primal
+        // infeasible whenever the vehicle's current state sits outside the corridor, which
+        // is exactly what happens when replanning at speed near an obstacle.
+        // (FrontEndSFC::compile_system_constraints applies the same relaxation.)
         for (int j = 0; j < pool.pts; ++j) {
+            if (global_cp_index < 3 || global_cp_index >= total_pts - 3) {
+                global_cp_index++;
+                continue;
+            }
+
             Eigen::MatrixXd A_padded = Eigen::MatrixXd::Zero(total_ineq, total_pts * num_dimensions);
             int col_start = global_cp_index * num_dimensions;
             A_padded.block(0, col_start, total_ineq, num_dimensions) = A_pool;
@@ -469,9 +684,10 @@ std::pair<Eigen::MatrixXd, Eigen::VectorXd> TrajectoryPlanner::build_overlap_con
     int num_dimensions = 3;
     int degree = config_.degree;
 
-    double north_end = config_.map_bounds.x();
-    double east_end = config_.map_bounds.y();
-    double alt_end = config_.map_bounds.z();
+    // NED-symmetric geofence, matching the A* bounds (see build_overlap_constraints).
+    double half_north = config_.map_bounds.x() / 2.0;
+    double half_east = config_.map_bounds.y() / 2.0;
+    double half_alt = config_.map_bounds.z() / 2.0;
 
     // Map boundary hyperplanes
     Eigen::MatrixXd A_map(6, 3);
@@ -482,7 +698,7 @@ std::pair<Eigen::MatrixXd, Eigen::VectorXd> TrajectoryPlanner::build_overlap_con
              0.0,  0.0,  1.0,
              0.0,  0.0, -1.0;
     Eigen::VectorXd b_map(6);
-    b_map << north_end, 0.0, east_end, 0.0, alt_end, 0.0;
+    b_map << half_north, half_north, half_east, half_east, half_alt, half_alt;
 
     std::vector<Eigen::MatrixXd> A_ineq_list;
     std::vector<Eigen::VectorXd> b_ineq_list;
@@ -504,23 +720,10 @@ std::pair<Eigen::MatrixXd, Eigen::VectorXd> TrajectoryPlanner::build_overlap_con
         // Virtual runway logic for natural splines
         if (config_.spline_type == "natural") {
             if (i == 0 || i == corridors.size() - 1) {
+                // Map hyperplanes are the final 6 rows (appended after the SFC rows).
                 double runway_length = 30.0;
-                for (int k = 0; k < total_ineq; ++k) {
-                    Eigen::Vector3d normal = A_mat.row(k).transpose();
-                    double val = b_vec(k);
-
-                    if (normal.isApprox(Eigen::Vector3d(1, 0, 0), 1e-2) && std::abs(val - north_end) < 1e-2)
-                        b_vec(k) += runway_length;
-                    else if (normal.isApprox(Eigen::Vector3d(-1, 0, 0), 1e-2) && std::abs(val) < 1e-2)
-                        b_vec(k) += runway_length;
-                    else if (normal.isApprox(Eigen::Vector3d(0, 1, 0), 1e-2) && std::abs(val - east_end) < 1e-2)
-                        b_vec(k) += runway_length;
-                    else if (normal.isApprox(Eigen::Vector3d(0, -1, 0), 1e-2) && std::abs(val) < 1e-2)
-                        b_vec(k) += runway_length;
-                    else if (normal.isApprox(Eigen::Vector3d(0, 0, 1), 1e-2) && std::abs(val - alt_end) < 1e-2)
-                        b_vec(k) += runway_length;
-                    else if (normal.isApprox(Eigen::Vector3d(0, 0, -1), 1e-2) && std::abs(val) < 1e-2)
-                        b_vec(k) += runway_length;
+                for (int k = total_ineq - 6; k < total_ineq; ++k) {
+                    b_vec(k) += runway_length;
                 }
             }
         }

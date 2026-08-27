@@ -8,13 +8,16 @@ namespace tests {
 
 TEST(AStarParityTest, WallBypassAndSmoothing) {
     // 1. Setup the identical Mock Grid
+    // VoxelGridData is a borrowed view now, so the test owns the actual cell set.
+    VoxelSet occupied;
     VoxelGridData grid;
     grid.voxel_resolution = 1.0;
+    grid.occupied_voxels_inflated = &occupied;
     
     // 2. Build the same wall at X=2
     for(int y = 0; y <= 5; ++y) {
         for(int z = 0; z <= 5; ++z) {
-            grid.occupied_voxels_inflated.insert(Eigen::Vector3i(2, y, z));
+            occupied.insert(Eigen::Vector3i(2, y, z));
         }
     }
     

@@ -114,8 +114,17 @@ TEST(DynamicSFCTest, ObstacleShrinksBounds) {
     // The +y bound should be shrunk below 5.0 (the max_drift)
     EXPECT_LT(bounds(2), 5.0);
 
-    // The -y, +z, -z bounds should remain at 5.0 (untouched by this obstacle)
-    EXPECT_NEAR(bounds(3), 5.0, 1e-6);
+    // +y is shrunk to (2.0 - r_y) = 1.75 by the obstacle.
+    EXPECT_NEAR(bounds(2), 1.75, 1e-6);
+
+    // -y does NOT stay at max_drift. build_bounds enforces an ASYMMETRIC drift budget: the
+    // two opposing faces share a total of 2*max_cp_drift, so squeezing one side lets the
+    // other take up the slack (10.0 - 1.75 = 8.25). Only when both sides are unconstrained
+    // do they settle at max_cp_drift each. This test previously asserted 5.0 on all three,
+    // which predates that redistribution.
+    EXPECT_NEAR(bounds(3), 8.25, 1e-6);
+
+    // z is untouched on both faces, so the budget splits evenly.
     EXPECT_NEAR(bounds(4), 5.0, 1e-6);
     EXPECT_NEAR(bounds(5), 5.0, 1e-6);
 
@@ -169,15 +178,45 @@ TEST(DynamicSFCTest, SpatialScannerCylinderFilter) {
         {5.0, 0.0, 5.0},   // Exactly on the line
     };
 
-    SpatialScanner scanner(cloud);
+    auto grid = std::make_shared<mapping::SparseVoxelGrid>(0.5, 0.5);
+    std::vector<mapping::ObstacleBox> obs_boxes;
+    for(const auto& p : cloud) {
+        obs_boxes.push_back({p - Eigen::Vector3d::Constant(0.25), p + Eigen::Vector3d::Constant(0.25)});
+    }
+    grid->update_from_obstacles(obs_boxes);
+
+    SpatialScanner scanner(grid);
 
     Eigen::Vector3d pA(0.0, 0.0, 5.0);
     Eigen::Vector3d pB(10.0, 0.0, 5.0);
 
     auto result = scanner.get_broad_phase_obstacles(pA, pB, 2.0, 1.0, 1.0);
 
-    // Should contain points at (5, 0.5, 5) and (5, 0, 5), NOT (5, 10, 5) or (-5, 0, 5)
-    EXPECT_EQ(result.size(), 2);
+    // The scanner returns INFLATED VOXEL CENTRES from the grid, not the original cloud
+    // points -- each point becomes a voxel-sized box grown by the inflation radius, which
+    // spans many cells. So the count is not 2; asserting on it was a leftover from when
+    // SpatialScanner took a raw point list. Assert the property that actually matters
+    // instead: everything returned lies inside the query cylinder, and the two points that
+    // should be excluded contributed nothing.
+    ASSERT_FALSE(result.empty());
+
+    const Eigen::Vector3d axis = (pB - pA).normalized();
+    const double W = 2.0, ext_start = 1.0, ext_end = 1.0;
+    const Eigen::Vector3d p_start = pA - axis * ext_start;
+    const double total_len = (pB - pA).norm() + ext_start + ext_end;
+
+    for (const auto& p : result) {
+        const double t = (p - p_start).dot(axis);
+        EXPECT_GE(t, 0.0);
+        EXPECT_LE(t, total_len);
+        EXPECT_LE((p - (p_start + t * axis)).norm(), W + 1e-9);
+    }
+
+    // Nothing from the far-lateral point (5,10,5) or the behind-the-start point (-5,0,5).
+    for (const auto& p : result) {
+        EXPECT_GT((p - Eigen::Vector3d(5.0, 10.0, 5.0)).norm(), 1.0);
+        EXPECT_GT((p - Eigen::Vector3d(-5.0, 0.0, 5.0)).norm(), 1.0);
+    }
 
     std::cout << "\n--- Spatial Scanner Test ---" << std::endl;
     std::cout << "Points in cylinder: " << result.size() << std::endl;
@@ -195,7 +234,14 @@ TEST(DynamicSFCTest, FullPipeline) {
         {5.0, -1.5, 5.0},
     };
 
-    AsymmetricSFCManager manager(obstacles, 0.0, 5.0, 0.5);
+    auto grid = std::make_shared<mapping::SparseVoxelGrid>(0.5, 0.5);
+    std::vector<mapping::ObstacleBox> obs_boxes;
+    for(const auto& p : obstacles) {
+        obs_boxes.push_back({p - Eigen::Vector3d::Constant(0.25), p + Eigen::Vector3d::Constant(0.25)});
+    }
+    grid->update_from_obstacles(obs_boxes);
+
+    AsymmetricSFCManager manager(grid, 0.0, 5.0, 0.5);
 
     Eigen::Vector3d pA(0.0, 0.0, 5.0);
     Eigen::Vector3d pB(10.0, 0.0, 5.0);

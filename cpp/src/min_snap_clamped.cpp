@@ -1,4 +1,6 @@
 #include "min_snap_clamped.hpp"
+#include <string>
+#include <algorithm>
 #include <stdexcept>
 #include <cmath>
 
@@ -13,6 +15,10 @@ MinSnapEvalClamped::MinSnapEvalClamped(int16_t num_segments, int8_t degree) {
     if (degree < 4) {
         throw invalid_argument("Minimum Snap requires a polynomial of at least degree 4.");
     }
+    // NOTE: 6 boundary constraints need >= 3 segments, but that is necessary, not sufficient.
+    // The snap stencil (derivative order == degree) needs more -- 4 segments at degree 4. The
+    // authoritative check lives in get_fast_cascaded_D_matrix(), which throws if the stencil
+    // does not fit; this one just fails earlier with a clearer message.
     if (num_segments < 3) {
         throw invalid_argument("To satisfy 6 physical constraints, you need at least 3 flight segments.");
     }
@@ -277,6 +283,23 @@ MatrixXd MinSnapEvalClamped::get_fast_cascaded_D_matrix(int16_t M, int8_t degree
     
     int16_t block_rows = boundary_block.rows();
     int16_t block_cols = boundary_block.cols();
+
+    // The boundary stencil must fit inside S_cascaded. It does not for small M: the snap
+    // case (derivative_order == degree == 4) needs a 4x8 stencil, while S_cascaded is only
+    // (M + degree - derivative_order) x (M + degree) -- so M = 3 gives a 3x7 matrix and the
+    // block write below runs off the end of it. Eigen catches that with an assertion in debug,
+    // but release builds define NDEBUG, so it silently corrupts the heap instead and the
+    // process dies later with "double free or corruption". Fail loudly rather than scribble:
+    // plan_mission's retry loop catches this and re-sizes the trajectory with more points.
+    if (block_rows > rows || block_cols > cols) {
+        throw std::invalid_argument(
+            "get_fast_cascaded_D_matrix: trajectory too short for a derivative of order "
+            + std::to_string(static_cast<int>(derivative_order)) + " -- needs at least "
+            + std::to_string(std::max(block_rows + derivative_order - degree,
+                                      block_cols - degree))
+            + " segments, got " + std::to_string(M) + ".");
+    }
+
     S_cascaded.block(0, 0, block_rows, block_cols) = boundary_block;
     
     double sign = (derivative_order % 2 == 0) ? 1.0 : -1.0;

@@ -157,16 +157,31 @@ class AStar_SFC_Planner:
         if self.aircraft_type == "fixed-wing":
             if hasattr(self.voxel_grid, 'continuous_inflated_bounds') and len(self.voxel_grid.continuous_inflated_bounds) > 0:
                 res = self.voxel_grid.voxel_resolution
-                p0 = np.array(idx_a) * res
-                p1 = np.array(idx_b) * res
+                # FIX 1: Cast from voxel CENTERS, not corners (matches C++ res/2.0 offset)
+                p0 = np.array(idx_a) * res + (res / 2.0)
+                p1 = np.array(idx_b) * res + (res / 2.0)
                 d = p1 - p0
                 
                 with np.errstate(divide='ignore'):
                     inv_d = 1.0 / d
                     
                 for b_min, b_max in self.voxel_grid.continuous_inflated_bounds:
-                    t1 = (b_min - p0) * inv_d
-                    t2 = (b_max - p0) * inv_d
+                    # FIX 2: Handle axis-aligned rays (d[i]==0) to avoid NaN (0*inf=nan)
+                    t1 = np.empty(3)
+                    t2 = np.empty(3)
+                    for i in range(3):
+                        if d[i] == 0.0:
+                            # Ray is parallel to this slab. Check if origin is inside.
+                            if p0[i] >= b_min[i] and p0[i] <= b_max[i]:
+                                t1[i] = -np.inf  # Always inside this slab
+                                t2[i] = np.inf
+                            else:
+                                t1[i] = np.inf   # Never inside this slab
+                                t2[i] = -np.inf
+                        else:
+                            t1[i] = (b_min[i] - p0[i]) * inv_d[i]
+                            t2[i] = (b_max[i] - p0[i]) * inv_d[i]
+                    
                     t_min = np.minimum(t1, t2)
                     t_max = np.maximum(t1, t2)
                     t_enter = np.max(t_min)

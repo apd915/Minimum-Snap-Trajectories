@@ -10,17 +10,29 @@ namespace tests {
 // ==========================================
 // Helper: Build a simple obstacle field for testing
 // ==========================================
+
+// ---------------------------------------------------------------------------------------
+// COORDINATE CONVENTION
+//
+// These fixtures were originally written for a 0..100 m positive-orthant world with
+// POSITIVE-UP z. The planner works in NED: the A* geofence is +/- map_bounds/2 about the
+// ORIGIN, and z is NEGATIVE-up (altitude 5 m is z = -5). Under the old coordinates the start
+// sat several metres underground -- rejected by the min_altitude floor -- and the goal fell
+// outside the geofence entirely, so A* correctly returned a single-point path and every
+// assertion on corridor count failed. The scene below is the same layout expressed in NED:
+// x/y centred on the origin, altitudes negative and inside the +/- map_bounds.z()/2 band.
+// ---------------------------------------------------------------------------------------
 static std::vector<mapping::ObstacleBox> build_test_obstacles() {
     std::vector<mapping::ObstacleBox> obstacles;
 
-    // A wall at X=50, spanning Y=[30,70], Z=[0,15]
-    obstacles.push_back({{50.0, 30.0, 0.0}, {52.0, 70.0, 15.0}});
+    // A wall at X=0, spanning Y=[-20,20], from ground up to 7 m altitude
+    obstacles.push_back({{0.0, -20.0, -7.0}, {2.0, 20.0, 0.0}});
 
-    // A pillar at (30, 50), Z=[0,10]
-    obstacles.push_back({{28.0, 48.0, 0.0}, {32.0, 52.0, 10.0}});
+    // A pillar at (-20, 0), up to 5 m altitude
+    obstacles.push_back({{-22.0, -2.0, -5.0}, {-18.0, 2.0, 0.0}});
 
-    // A pillar at (70, 50), Z=[0,10]
-    obstacles.push_back({{68.0, 48.0, 0.0}, {72.0, 52.0, 10.0}});
+    // A pillar at (20, 0), up to 5 m altitude
+    obstacles.push_back({{18.0, -2.0, -5.0}, {22.0, 2.0, 0.0}});
 
     return obstacles;
 }
@@ -42,10 +54,12 @@ TEST(FrontEndTest, GeneratesCorridors) {
     config.map_bounds = Eigen::Vector3d(100.0, 100.0, 15.0);
 
     auto obstacles = build_test_obstacles();
-    FrontEndSFC front_end(config, obstacles);
+    auto grid = std::make_shared<mapping::SparseVoxelGrid>(config.voxel_resolution, config.drone_physical_radius);
+    grid->update_from_obstacles(obstacles);
+    FrontEndSFC front_end(config, grid);
 
-    Eigen::Vector3d start(2.0, 2.0, 5.0);
-    Eigen::Vector3d goal(98.0, 98.0, 10.0);
+    Eigen::Vector3d start(-30.0, -30.0, -4.0);
+    Eigen::Vector3d goal(30.0, 30.0, -5.0);
 
     auto t1 = std::chrono::high_resolution_clock::now();
     auto result = front_end.get_corridors_astar(start, goal);
@@ -97,10 +111,12 @@ TEST(FrontEndTest, EmptyMap) {
     config.map_bounds = Eigen::Vector3d(50.0, 50.0, 15.0);
 
     std::vector<mapping::ObstacleBox> no_obstacles;
-    FrontEndSFC front_end(config, no_obstacles);
+    auto grid = std::make_shared<mapping::SparseVoxelGrid>(config.voxel_resolution, config.drone_physical_radius);
+    grid->update_from_obstacles(no_obstacles);
+    FrontEndSFC front_end(config, grid);
 
-    Eigen::Vector3d start(2.0, 2.0, 5.0);
-    Eigen::Vector3d goal(48.0, 48.0, 10.0);
+    Eigen::Vector3d start(-20.0, -20.0, -4.0);
+    Eigen::Vector3d goal(20.0, 20.0, -5.0);
 
     auto result = front_end.get_corridors_astar(start, goal);
 

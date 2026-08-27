@@ -386,6 +386,16 @@ def run_benchmark_suite(num_trials=100):
             voxel_resolution=res
         )
 
+        # --- RING BUFFER SYNC ---
+        # Rebuild the ring buffer so A* search and the LoS smoother see the new random obstacles
+        from mapping.ring_buffer import RingBufferGrid
+        size_x = int(np.ceil(100.0 / res)) + 1
+        size_y = int(np.ceil(100.0 / res)) + 1
+        size_z = int(np.ceil(15.0 / res)) + 1
+        planner.front_end.discrete_grid.ring_buffer = RingBufferGrid(size_x, size_y, size_z)
+        for (vx, vy, vz) in planner.front_end.discrete_grid.occupied_voxels_inflated:
+            planner.front_end.discrete_grid.ring_buffer.set_occupied(vx, vy, vz)
+
         trial_data = {
             "trial_id": i,
             "success": False,
@@ -431,13 +441,13 @@ def run_benchmark_suite(num_trials=100):
         # Safely fetch the corridors (returns empty list if A* crashed completely)
         corridors_to_plot = getattr(planner.front_end, 'last_corridors', [])
         
-        # visualize_random_city(
-        #     obstacles=random_obstacles, 
-        #     control_points=control_points, 
-        #     degree=planner.degree, 
-        #     knots=knots,
-        #     safeFlightCorridors_list=corridors_to_plot
-        # )
+        visualize_random_city(
+            obstacles=random_obstacles, 
+            control_points=control_points, 
+            degree=planner.degree, 
+            knots=knots,
+            safeFlightCorridors_list=corridors_to_plot
+        )
         
     # 4. Export the Data
     df = pd.DataFrame(results)

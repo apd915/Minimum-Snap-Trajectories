@@ -17,9 +17,19 @@ find_package(osqp REQUIRED)
 # ==========================================
 # 2. BUILD THE MATH ENGINE LIBRARY
 # ==========================================
-# We compile your B-spline math into a SHARED library (.so). 
-# This is crucial so your Python scripts can import it later!
-add_library(min_snap_engine SHARED
+# STATIC on purpose.
+#
+# As a shared library this ended up existing in two places at once -- cpp/build/ from a
+# standalone build, and the copy a consumer installs after pulling this repo in via
+# add_subdirectory(). Rebuild one and not the other and the loader silently picks up the
+# stale copy, which surfaces as undefined symbols, garbage return values, or
+# "free(): invalid pointer" -- none of which look like a linking problem.
+#
+# Linked statically, the code lands inside each consumer's binary. A stale archive then
+# fails at LINK time with a clear undefined-symbol error instead of at runtime with
+# nonsense. PIC is kept on so this can still be linked into a shared object (e.g. the
+# pybind11 module) if needed.
+add_library(min_snap_engine STATIC
     src/min_snap_natural.cpp
     src/min_snap_clamped.cpp
     src/matrix_builder.cpp
@@ -34,6 +44,20 @@ add_library(min_snap_engine SHARED
 
 # Tell the compiler where to find your .hpp header files
 target_include_directories(min_snap_engine PUBLIC include)
+set_target_properties(min_snap_engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# Keep Eigen's bounds checks alive in optimised builds.
+#
+# Release defines NDEBUG, which deletes every Eigen assertion, so an out-of-range block
+# corrupts the heap instead of faulting (see include/eigen_safety.hpp for the bug that
+# motivated this). Force-including the header ahead of every translation unit redefines
+# eigen_assert to throw, which the planner's existing try/catch turns into a recoverable
+# planning failure. PUBLIC so consumers (roscopter) get the same protection.
+option(MIN_SNAP_EIGEN_SAFETY "Turn Eigen bounds assertions into exceptions in release builds" ON)
+if(MIN_SNAP_EIGEN_SAFETY)
+    target_compile_options(min_snap_engine PUBLIC
+        -include ${CMAKE_CURRENT_SOURCE_DIR}/include/eigen_safety.hpp)
+endif()
 
 # Link the Eigen3 math library to your engine
 target_link_libraries(min_snap_engine PUBLIC Eigen3::Eigen osqp::osqp)
@@ -65,16 +89,38 @@ include(GoogleTest)
 gtest_discover_tests(bspline_tests)
 
 # ==========================================
+# 3b. EXAMPLES
+# ==========================================
+# Built by default so that CI catches the example rotting against an API change. It is one
+# small translation unit and nothing is executed at build time, so the cost is negligible --
+# and a usage example that no longer compiles is worse than no example at all.
+option(BUILD_EXAMPLES "Build example programs" ON)
+
+if(BUILD_EXAMPLES)
+    add_executable(minimal_planner_loop examples/minimal_planner_loop.cpp)
+    target_link_libraries(minimal_planner_loop PRIVATE min_snap_engine)
+endif()
+
+# ==========================================
 # 4. PYTHON BINDINGS (PYBIND11)
 # ==========================================
-include(FetchContent)
-FetchContent_Declare(
-    pybind11
-    GIT_REPOSITORY https://github.com/pybind/pybind11.git
-    GIT_TAG        v2.11.1
-)
-FetchContent_MakeAvailable(pybind11)
+# Default OFF: src/python_bindings.cpp still calls the old
+# TrajectoryPlanner(config, obstacles, ...) signature, which was replaced by
+# TrajectoryPlanner(config, shared_ptr<SparseVoxelGrid>, ...). Leaving this ON made the
+# documented `make -j$(nproc)` fail for anyone following the README. Turn it back ON once
+# the bindings are updated.
+option(BUILD_PYTHON_BINDINGS "Build Python Bindings" OFF)
 
-pybind11_add_module(min_snap_bindings src/python_bindings.cpp)
-target_include_directories(min_snap_bindings PUBLIC include)
-target_link_libraries(min_snap_bindings PRIVATE min_snap_engine)
+if(BUILD_PYTHON_BINDINGS)
+    include(FetchContent)
+    FetchContent_Declare(
+        pybind11
+        GIT_REPOSITORY https://github.com/pybind/pybind11.git
+        GIT_TAG        v2.11.1
+    )
+    FetchContent_MakeAvailable(pybind11)
+
+    pybind11_add_module(min_snap_bindings src/python_bindings.cpp)
+    target_include_directories(min_snap_bindings PUBLIC include)
+    target_link_libraries(min_snap_bindings PRIVATE min_snap_engine)
+endif()

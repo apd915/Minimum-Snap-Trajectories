@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <cmath>
 #include <tuple>
+#include <memory>
 #include "static_sfc.hpp"
+#include "voxel_grid.hpp"
 
 namespace trajectory_planner {
 namespace sfc {
@@ -51,7 +53,7 @@ private:
 // ==========================================
 class SpatialScanner {
 public:
-    explicit SpatialScanner(const std::vector<Eigen::Vector3d>& obstacle_points);
+    explicit SpatialScanner(std::shared_ptr<mapping::SparseVoxelGrid> grid);
 
     /**
      * Vectorized Discrete Cylinder Search.
@@ -63,7 +65,7 @@ public:
         double W, double ext_start, double ext_end) const;
 
 private:
-    std::vector<Eigen::Vector3d> points_;
+    std::shared_ptr<mapping::SparseVoxelGrid> grid_;
 };
 
 // ==========================================
@@ -82,6 +84,9 @@ public:
     build_bounds(const Eigen::Vector3d& pA, const Eigen::Vector3d& pB,
                  const std::vector<Eigen::Vector3d>& obs_points,
                  double ext_start, double ext_end) const;
+
+    /** Largest lateral half-extent any single face of the box can start at. */
+    double max_lateral_extent() const { return 2.0 * max_drift_; }
 
 private:
     double drone_radius_;
@@ -109,7 +114,7 @@ public:
 // ==========================================
 class AsymmetricSFCManager {
 public:
-    AsymmetricSFCManager(const std::vector<Eigen::Vector3d>& raw_uninflated_obstacle_points,
+    AsymmetricSFCManager(std::shared_ptr<mapping::SparseVoxelGrid> grid,
                          double drone_physical_radius,
                          double max_cp_drift,
                          double voxel_resolution = 1.0);

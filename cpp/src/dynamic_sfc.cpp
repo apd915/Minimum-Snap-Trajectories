@@ -8,14 +8,14 @@ namespace sfc {
 // ==========================================
 // SpatialScanner Implementation
 // ==========================================
-SpatialScanner::SpatialScanner(const std::vector<Eigen::Vector3d>& obstacle_points)
-    : points_(obstacle_points) {}
+SpatialScanner::SpatialScanner(std::shared_ptr<mapping::SparseVoxelGrid> grid)
+    : grid_(std::move(grid)) {}
 
 std::vector<Eigen::Vector3d> SpatialScanner::get_broad_phase_obstacles(
     const Eigen::Vector3d& pA, const Eigen::Vector3d& pB,
     double W, double ext_start, double ext_end) const {
 
-    if (points_.empty()) return {};
+    if (!grid_) return {};
 
     Eigen::Vector3d v = pB - pA;
     double dist = v.norm();
@@ -29,12 +29,13 @@ std::vector<Eigen::Vector3d> SpatialScanner::get_broad_phase_obstacles(
     Eigen::Vector3d midpoint = p_start + u * (total_len / 2.0);
     double search_radius = std::sqrt((total_len / 2.0) * (total_len / 2.0) + W * W);
 
-    std::vector<Eigen::Vector3d> result;
-    result.reserve(points_.size() / 4); // Reasonable pre-alloc
+    // Use KD-Tree radius search instead of iterating over all points
+    std::vector<Eigen::Vector3d> candidate_points = grid_->get_obstacles_in_radius(midpoint, search_radius);
 
-    for (const auto& pt : points_) {
-        // Broad-phase sphere check
-        if ((pt - midpoint).norm() > search_radius) continue;
+    std::vector<Eigen::Vector3d> result;
+    result.reserve(candidate_points.size()); // Reasonable pre-alloc
+
+    for (const auto& pt : candidate_points) {
 
         // Narrow-phase: project onto cylinder axis
         Eigen::Vector3d vec_to_pt = pt - p_start;
@@ -58,7 +59,7 @@ std::vector<Eigen::Vector3d> SpatialScanner::get_broad_phase_obstacles(
 // AsymmetricBoxBuilder Implementation
 // ==========================================
 AsymmetricBoxBuilder::AsymmetricBoxBuilder(double drone_physical_radius, double max_cp_drift, double voxel_resolution)
-    : drone_radius_(drone_physical_radius), max_drift_(max_cp_drift), voxel_resolution_(voxel_resolution) {}
+    : drone_radius_(drone_physical_radius), voxel_resolution_(voxel_resolution), max_drift_(max_cp_drift) {}
 
 std::tuple<Eigen::Vector3d, Eigen::Vector3d, Eigen::Vector3d, Eigen::Matrix<double, 6, 1>>
 AsymmetricBoxBuilder::build_bounds(
@@ -76,16 +77,19 @@ AsymmetricBoxBuilder::build_bounds(
     uy.normalize();
     Eigen::Vector3d uz = ux.cross(uy);
 
+    double max_total_drift = 2.0 * max_drift_;
     Eigen::Matrix<double, 6, 1> bounds;
     bounds << dist + ext_end, ext_start,
-              max_drift_, max_drift_,
-              max_drift_, max_drift_;
+              max_total_drift, max_total_drift,
+              max_total_drift, max_total_drift;
 
     // Exact OBB-AABB Projection (SAT)
+    // The obstacle points are already inflated by drone_radius in the VoxelGrid.
+    // We only need the half_res projection to mathematically bound the cubic voxel corners.
     double half_res = voxel_resolution_ / 2.0;
-    double r_x = drone_radius_ + half_res * (std::abs(ux.x()) + std::abs(ux.y()) + std::abs(ux.z()));
-    double r_y = drone_radius_ + half_res * (std::abs(uy.x()) + std::abs(uy.y()) + std::abs(uy.z()));
-    double r_z = drone_radius_ + half_res * (std::abs(uz.x()) + std::abs(uz.y()) + std::abs(uz.z()));
+    double r_x = half_res * (std::abs(ux.x()) + std::abs(ux.y()) + std::abs(ux.z()));
+    double r_y = half_res * (std::abs(uy.x()) + std::abs(uy.y()) + std::abs(uy.z()));
+    double r_z = half_res * (std::abs(uz.x()) + std::abs(uz.y()) + std::abs(uz.z()));
 
     // Project and sort by true segment distance
     struct ProjectedPoint {
@@ -153,6 +157,30 @@ AsymmetricBoxBuilder::build_bounds(
             }
         }
     }
+    // --- Enforce Asymmetric Drift Budget ---
+    // Y-axis (Horizontal)
+    if (bounds(2) + bounds(3) > max_total_drift) {
+        if (bounds(2) >= max_drift_ && bounds(3) >= max_drift_) {
+            bounds(2) = max_drift_;
+            bounds(3) = max_drift_;
+        } else if (bounds(2) > bounds(3)) {
+            bounds(2) = std::min(bounds(2), max_total_drift - bounds(3));
+        } else {
+            bounds(3) = std::min(bounds(3), max_total_drift - bounds(2));
+        }
+    }
+
+    // Z-axis (Vertical)
+    if (bounds(4) + bounds(5) > max_total_drift) {
+        if (bounds(4) >= max_drift_ && bounds(5) >= max_drift_) {
+            bounds(4) = max_drift_;
+            bounds(5) = max_drift_;
+        } else if (bounds(4) > bounds(5)) {
+            bounds(4) = std::min(bounds(4), max_total_drift - bounds(5));
+        } else {
+            bounds(5) = std::min(bounds(5), max_total_drift - bounds(4));
+        }
+    }
 
     return {ux, uy, uz, bounds};
 }
@@ -185,20 +213,27 @@ void OBBAdapters::get_osqp_matrices(
 // ==========================================
 // AsymmetricSFCManager Implementation
 // ==========================================
-AsymmetricSFCManager::AsymmetricSFCManager(
-    const std::vector<Eigen::Vector3d>& raw_uninflated_obstacle_points,
-    double drone_physical_radius,
-    double max_cp_drift,
-    double voxel_resolution)
-    : scanner_(raw_uninflated_obstacle_points),
+AsymmetricSFCManager::AsymmetricSFCManager(std::shared_ptr<mapping::SparseVoxelGrid> grid,
+                                             double drone_physical_radius,
+                                             double max_cp_drift,
+                                             double voxel_resolution)
+    : scanner_(grid),
       builder_(drone_physical_radius, max_cp_drift, voxel_resolution) {}
 
 SFCResult AsymmetricSFCManager::generate_sfc(
     const Eigen::Vector3d& pA, const Eigen::Vector3d& pB,
     double W, double ext_start, double ext_end) const {
 
-    // Layer 1: Fetch raw points
-    auto obs_points = scanner_.get_broad_phase_obstacles(pA, pB, W, ext_start, ext_end);
+    // Layer 1: Fetch raw points.
+    //
+    // The scan cylinder must enclose every point the box could still contain, otherwise
+    // an unscanned obstacle can end up INSIDE the finished corridor. The box starts at
+    // max_lateral_extent() on each of the y/z faces, so its corners reach
+    // sqrt(2) * max_lateral_extent() from the axis -- which exceeds W whenever the box is
+    // asymmetric. Scan the larger of the two radii.
+    double corner_reach = std::sqrt(2.0) * builder_.max_lateral_extent();
+    double scan_radius = std::max(W, corner_reach);
+    auto obs_points = scanner_.get_broad_phase_obstacles(pA, pB, scan_radius, ext_start, ext_end);
 
     // Layer 2: Calculate local frame and shrink bounds
     auto [ux, uy, uz, bounds] = builder_.build_bounds(pA, pB, obs_points, ext_start, ext_end);
